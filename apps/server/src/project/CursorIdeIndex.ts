@@ -269,7 +269,12 @@ export function buildCursorIdeIndex(
   return { composers, workspaceListState, parentOf, pathFolderOf: new Map(pathFolders) };
 }
 
-let cache: { key: string; index: Promise<CursorIdeIndex> } | null = null;
+let cache: {
+  key: string;
+  readPathEvidence: boolean;
+  builtAt: number;
+  index: Promise<CursorIdeIndex>;
+} | null = null;
 
 function cacheKey(globalDb: string, readPathEvidence: boolean): string | null {
   try {
@@ -289,16 +294,26 @@ function cacheKey(globalDb: string, readPathEvidence: boolean): string | null {
 /**
  * The composer index, built off the event loop; null when the DB is absent or the build fails or times out.
  * Listing passes `readPathEvidence: false` so the worker never opens bubble rows.
+ * `reuse` keeps serving an index built that recently even when the db has
+ * changed since: a running IDE touches the db every few seconds.
  */
 export async function loadCursorIdeIndex(
   globalDb: string,
   workspaceStorage: string,
   timeoutMs = 300_000,
   readPathEvidence = false,
+  /** Serve an index built within maxAgeMs of now, even if the db changed since. */
+  reuse: { readonly now: number; readonly maxAgeMs: number } = { now: 0, maxAgeMs: 0 },
 ): Promise<CursorIdeIndex | null> {
   const key = cacheKey(globalDb, readPathEvidence);
   if (key === null) return null;
-  if (cache === null || cache.key !== key) {
+  const fresh =
+    cache !== null &&
+    (cache.key === key ||
+      (cache.readPathEvidence === readPathEvidence &&
+        cache.key.startsWith(`${globalDb}\0`) &&
+        reuse.now - cache.builtAt < reuse.maxAgeMs));
+  if (!fresh) {
     const index = new Promise<CursorIdeIndex>((resolve, reject) => {
       const worker = new NodeWorkerThreads.Worker(WORKER_SOURCE, {
         eval: true,
@@ -325,12 +340,12 @@ export async function loadCursorIdeIndex(
         reject(error);
       });
     });
-    cache = { key, index };
+    cache = { key, readPathEvidence, builtAt: reuse.now, index };
     index.catch(() => {
       if (cache?.index === index) cache = null;
     });
   }
-  return cache.index.catch(() => null);
+  return cache!.index.catch(() => null);
 }
 
 /** Virtual transcript path for a composer that only exists in the IDE DB. */

@@ -3,6 +3,7 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeSqlite from "node:sqlite";
+import * as NodeUrl from "node:url";
 import { describe, expect, it } from "@effect/vitest";
 
 import {
@@ -132,7 +133,7 @@ describe("cursorIdePathEvidenceFolder", () => {
     NodeFS.mkdirSync(folder, { recursive: true });
     NodeFS.writeFileSync(
       NodePath.join(workspaceStorage, workspaceId, "workspace.json"),
-      JSON.stringify({ folder: `file://${folder}` }),
+      JSON.stringify({ folder: NodeUrl.pathToFileURL(folder).href }),
     );
     const globalDb = NodePath.join(root, "User", "globalStorage", "state.vscdb");
     NodeFS.mkdirSync(NodePath.dirname(globalDb), { recursive: true });
@@ -142,7 +143,9 @@ describe("cursorIdePathEvidenceFolder", () => {
       name: "Loose",
       fullConversationHeadersOnly: [{ bubbleId: "b1" }],
     };
-    const bubble = { relevantFiles: [`file://${folder}/src/main.ts`] };
+    const bubble = {
+      relevantFiles: [NodeUrl.pathToFileURL(NodePath.join(folder, "src", "main.ts")).href],
+    };
     const insert = db.prepare("INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)");
     insert.run("composerData:loose", JSON.stringify(composer));
     insert.run("bubbleId:loose:b1", JSON.stringify(bubble));

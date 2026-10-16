@@ -48,6 +48,8 @@ export const discoverCursorTranscripts = Effect.fn("discoverCursorTranscripts")(
   homePath: string,
   providerInstanceId: ProviderInstanceId,
   operationBudget: number,
+  /** Reuse an IDE index built within this window even if the db changed since. */
+  ideIndexMaxAgeMs = 0,
 ) {
   const listDirectory = (directory: string) =>
     deps.fileSystem
@@ -242,8 +244,12 @@ export const discoverCursorTranscripts = Effect.fn("discoverCursorTranscripts")(
   });
   // Every composer in the IDE global DB, labeled, nothing hidden (T3 as a Cursor debugger).
   const globalDb = cursorIdeGlobalStateDb(deps.path, workspaceStorage);
+  const now = yield* Effect.clockWith((clock) => clock.currentTimeMillis);
   const ideIndex = yield* Effect.promise(() =>
-    loadCursorIdeIndex(globalDb, workspaceStorage, 300_000, false),
+    loadCursorIdeIndex(globalDb, workspaceStorage, 300_000, false, {
+      now,
+      maxAgeMs: ideIndexMaxAgeMs,
+    }),
   );
   if (ideIndex === null) {
     return { transcripts: deduped, truncated };

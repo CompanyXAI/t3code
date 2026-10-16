@@ -21,8 +21,16 @@ import {
   type CursorTranscriptCandidate,
 } from "./CursorTranscriptDiscovery.ts";
 
-/** Full directory walk cadence. IDE db mtime changes refresh on the next tick. */
-const REFRESH_EVERY_MS = 60_000;
+/**
+ * A running Cursor IDE writes its global state db (and WAL) every few seconds,
+ * so the fingerprint is almost never stable. Changes are picked up at most once
+ * per MIN_RESCAN_MS; with no change a full pass still runs every
+ * FULL_RESCAN_MS as a safety net.
+ */
+const MIN_RESCAN_MS = 60_000;
+const FULL_RESCAN_MS = 10 * 60_000;
+/** The IDE composer index (15+ GB db on busy machines) is rebuilt at most this often. */
+const IDE_INDEX_MAX_AGE_MS = 5 * 60_000;
 const DISCOVERY_OPERATION_BUDGET = 20_000;
 
 export interface CursorSourceSnapshot {
@@ -108,18 +116,17 @@ const make = Effect.gen(function* () {
     const fingerprint = yield* fingerprintOf(homePath);
     const now = yield* Effect.clockWith((clock) => clock.currentTimeMillis);
     const existing = cache.get(homePath);
-    if (
-      existing !== undefined &&
-      existing.fingerprint === fingerprint &&
-      now - existing.refreshedAt < REFRESH_EVERY_MS
-    ) {
-      return;
+    if (existing !== undefined) {
+      const age = now - existing.refreshedAt;
+      if (age < MIN_RESCAN_MS) return;
+      if (existing.fingerprint === fingerprint && age < FULL_RESCAN_MS) return;
     }
     const discovered = yield* discoverCursorTranscripts(
       deps,
       homePath,
       providerInstanceId,
       DISCOVERY_OPERATION_BUDGET,
+      IDE_INDEX_MAX_AGE_MS,
     ).pipe(
       Effect.catchCause((cause) =>
         Effect.logWarning("Cursor source sync failed", { cause }).pipe(
