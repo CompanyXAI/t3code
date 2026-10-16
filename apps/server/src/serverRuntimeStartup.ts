@@ -317,15 +317,16 @@ export const resolveAutoBootstrapWelcomeTargets = Effect.gen(function* () {
             creationSource: "server",
           })
           .pipe(
-            Effect.catchTag("ThreadManagementProviderInstanceDisabledError", (error) =>
-              Effect.logWarning(
-                "Skipped auto-bootstrap thread; provider instance is disabled for project",
-                {
-                  projectId: error.projectId,
-                  instanceId: error.instanceId,
-                },
-              ).pipe(Effect.as(undefined)),
-            ),
+            Effect.catchTags({
+              ThreadManagementProviderInstanceDisabledError: (error) =>
+                Effect.logWarning(
+                  "Skipped auto-bootstrap thread; provider instance is disabled for project",
+                  {
+                    projectId: error.projectId,
+                    instanceId: error.instanceId,
+                  },
+                ).pipe(Effect.as(undefined)),
+            }),
           );
         if (launched !== undefined) {
           bootstrapThreadId = launched.threadId;

@@ -194,7 +194,7 @@ export interface CursorRuntimeAgentPolicy {
 
 export function cursorRuntimeAgentPolicy(
   runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
-  platform: NodeJS.Platform = process.platform,
+  platform: NodeJS.Platform = HostProcess.Platform.defaultValue(),
 ): CursorRuntimeAgentPolicy {
   const sandboxPolicyType =
     typeof runtimePolicy.sandboxPolicy === "object" &&
@@ -2395,44 +2395,53 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
             return Effect.succeed({ kind: "local" });
           }
           const cwd = openInput.runtimePolicy.cwd;
-          return Effect.tryPromise({
-            try: async (): Promise<CursorAgentTarget> => {
-              if (cwd === null) {
-                throw new Error(
-                  "Pick a project first: a worker or cloud agent needs its git repo.",
-                );
-              }
-              const repo = await gitRepoTarget(cwd);
-              if (runsOn === "cloud") {
-                return { kind: "remote", runsOn, instanceId: adapterOptions.instanceId, ...repo };
-              }
-              const workerName =
-                adapterOptions.stateDir === undefined
-                  ? undefined
-                  : await runningWorkerName(
-                      cursorWorkerRoot(adapterOptions.stateDir, adapterOptions.instanceId),
-                      process.platform as Parameters<typeof runningWorkerName>[1],
-                      adapterOptions.environment,
+          return HostProcess.Platform.pipe(
+            Effect.flatMap((platform) =>
+              Effect.tryPromise({
+                try: async (): Promise<CursorAgentTarget> => {
+                  if (cwd === null) {
+                    throw new Error(
+                      "Pick a project first: a worker or cloud agent needs its git repo.",
                     );
-              if (workerName === undefined) {
-                throw new Error(
-                  "No worker is running for this account. Start it on the Cursor agents page first",
-                );
-              }
-              return {
-                kind: "remote",
-                runsOn,
-                workerName,
-                instanceId: adapterOptions.instanceId,
-                ...repo,
-              };
-            },
-            catch: (cause) =>
-              new ProviderAdapter.ProviderAdapterProtocolError({
-                driver: CursorAgentSdk.CURSOR_PROVIDER,
-                detail: cause instanceof Error ? cause.message : String(cause),
+                  }
+                  const repo = await gitRepoTarget(cwd);
+                  if (runsOn === "cloud") {
+                    return {
+                      kind: "remote",
+                      runsOn,
+                      instanceId: adapterOptions.instanceId,
+                      ...repo,
+                    };
+                  }
+                  const workerName =
+                    adapterOptions.stateDir === undefined
+                      ? undefined
+                      : await runningWorkerName(
+                          cursorWorkerRoot(adapterOptions.stateDir, adapterOptions.instanceId),
+                          platform as Parameters<typeof runningWorkerName>[1],
+                          adapterOptions.environment,
+                        );
+                  if (workerName === undefined) {
+                    throw new Error(
+                      "No worker is running for this account. Start it on the Cursor agents page first",
+                    );
+                  }
+                  return {
+                    kind: "remote",
+                    runsOn,
+                    workerName,
+                    instanceId: adapterOptions.instanceId,
+                    ...repo,
+                  };
+                },
+                catch: (cause) =>
+                  new ProviderAdapter.ProviderAdapterProtocolError({
+                    driver: CursorAgentSdk.CURSOR_PROVIDER,
+                    detail: cause instanceof Error ? cause.message : String(cause),
+                  }),
               }),
-          });
+            ),
+          );
         };
 
         const openAgent = Effect.fnUntraced(function* (openInput: {

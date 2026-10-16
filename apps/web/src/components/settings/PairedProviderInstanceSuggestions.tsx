@@ -83,19 +83,21 @@ function PairedEnvironmentSuggestions(
           key={suggestion.sourceInstanceId}
           variant="outline"
           size="sm"
-          className="justify-start gap-2"
+          className="justify-start"
           onClick={() => props.onPick(suggestion)}
         >
-          <ProviderInstanceIcon
-            driverKind={suggestion.driver}
-            displayName={suggestion.label}
-            iconClassName="size-4"
-          />
-          <span className="min-w-0 flex-1 truncate text-left">{suggestion.label}</span>
-          <span className="truncate font-mono text-xs text-muted-foreground">
-            {suggestion.instanceIdClash ? "new id" : suggestion.sourceInstanceId}
+          <span className="flex min-w-0 flex-1 items-center gap-2">
+            <ProviderInstanceIcon
+              driverKind={suggestion.driver}
+              displayName={suggestion.label}
+              iconClassName="size-4"
+            />
+            <span className="min-w-0 flex-1 truncate text-left">{suggestion.label}</span>
+            <span className="truncate font-mono text-xs text-muted-foreground">
+              {suggestion.instanceIdClash ? "new id" : suggestion.sourceInstanceId}
+            </span>
+            <CopyPlusIcon className="size-3.5 shrink-0" aria-hidden />
           </span>
-          <CopyPlusIcon className="size-3.5 shrink-0" aria-hidden />
         </Button>
       ))}
     </div>

@@ -3,10 +3,11 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { describe, expect, it } from "@effect/vitest";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { makeCursorMachine } from "./CursorMachine.ts";
 
 describe("logon task of an instance with its own home", () => {
-  it.skipIf(process.platform !== "win32")(
+  it.skipIf(HostProcess.Platform.defaultValue() !== "win32")(
     "lands in the Windows user's Startup folder, not inside the Cursor home",
     async () => {
       const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-cursor-startup-"));

@@ -2065,9 +2065,12 @@ function ImportCandidateThreads({
               nested ? "pl-16" : "pl-10",
             )}
           >
-            <span className="min-w-0 flex-1 truncate" title={thread.providerSessionId}>
-              {thread.title ?? <span className="font-mono">{thread.providerSessionId}</span>}
-            </span>
+            <Tooltip>
+              <TooltipTrigger render={<span className="min-w-0 flex-1 truncate" />}>
+                {thread.title ?? <span className="font-mono">{thread.providerSessionId}</span>}
+              </TooltipTrigger>
+              <TooltipPopup variant="code">{thread.providerSessionId}</TooltipPopup>
+            </Tooltip>
             {(thread.labels ?? []).map((label) => (
               <Badge key={label} size="sm" variant="outline" className="shrink-0">
                 {label}

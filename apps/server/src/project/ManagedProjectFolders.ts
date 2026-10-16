@@ -5,6 +5,7 @@ import {
   type ThreadId,
   VcsProcessSpawnError,
 } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { newProjectFolderName } from "@t3tools/shared/path";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -326,7 +327,7 @@ const make = Effect.gen(function* () {
     // Windows: agent tools nest deep stores under a per-folder path (Cursor's
     // SDK store hits MAX_PATH and fails with "unable to open database file"),
     // so the folder name keeps only the date and id there.
-    const words = process.platform === "win32" ? "" : folderWords(input.text);
+    const words = (yield* HostProcess.Platform) === "win32" ? "" : folderWords(input.text);
     const id = input.threadId.toLowerCase().replace(/[^a-z0-9]/g, "");
     const folderFor = (idPart: string) =>
       path.join(root.value, [date, words, idPart].filter(Boolean).join("-"));

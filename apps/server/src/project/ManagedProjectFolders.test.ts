@@ -7,6 +7,7 @@ import {
   ThreadId,
   VcsProcessSpawnError,
 } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -257,7 +258,7 @@ it.effect("gives each Scratch thread its own folder, named from its message", ()
         assert.equal(path.dirname(folder), root);
         assert.match(
           path.basename(folder),
-          process.platform === "win32"
+          (yield* HostProcess.Platform) === "win32"
             ? /^\d{4}-\d{2}-\d{2}-[a-z0-9-]+$/
             : /^\d{4}-\d{2}-\d{2}-convert-these-pngs-to-webp-/,
         );

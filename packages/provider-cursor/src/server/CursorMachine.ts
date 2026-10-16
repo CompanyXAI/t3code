@@ -11,7 +11,7 @@
  *
  * @module provider-cursor/server/CursorMachine
  */
-import { spawn, execFile, type ChildProcess } from "node:child_process";
+import * as NodeChildProcess from "node:child_process";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 
@@ -191,7 +191,7 @@ export async function runningWorkerName(
 
 /** The login URL `cursor-agent login` prints when no browser is opened. */
 export function parseLoginUrl(output: string): string | undefined {
-  // oxlint-disable-next-line no-control-regex
+  // oxlint-disable-next-line no-control-regex -- strips ANSI CSI sequences from CLI login output
   const clean = output.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
   return /https:\/\/cursor\.com\/\S+/.exec(clean)?.[0];
 }
@@ -276,7 +276,7 @@ export interface CursorMachineDeps {
   readonly binary?: string;
   /** Email of the instance's SDK account, for the guard. */
   readonly sdkEmail: () => Promise<string | undefined>;
-  readonly spawn?: typeof spawn;
+  readonly spawn?: typeof NodeChildProcess.spawn;
   readonly run?: (
     file: string,
     args: ReadonlyArray<string>,
@@ -295,7 +295,7 @@ export interface CursorWorkerState {
 
 const defaultRun = (file: string, args: ReadonlyArray<string>, env: NodeJS.ProcessEnv) =>
   new Promise<string>((resolve, reject) =>
-    execFile(file, [...args], { env, timeout: 30_000 }, (error, stdout, stderr) =>
+    NodeChildProcess.execFile(file, [...args], { env, timeout: 30_000 }, (error, stdout, stderr) =>
       error
         ? reject(Object.assign(error, { output: `${stdout}${stderr}` }))
         : resolve(`${stdout}${stderr}`),
@@ -308,7 +308,7 @@ export function makeCursorMachine(config: CursorHomeConfig, deps: CursorMachineD
   const homeDir = resolveCursorHomePath(config, context);
   const binary = deps.binary ?? CURSOR_CLI_BINARY;
   const run = deps.run ?? defaultRun;
-  const doSpawn = deps.spawn ?? spawn;
+  const doSpawn = deps.spawn ?? NodeChildProcess.spawn;
   const win = deps.platform === "win32";
   const {
     CURSOR_API_KEY: _k,
@@ -346,8 +346,8 @@ export function makeCursorMachine(config: CursorHomeConfig, deps: CursorMachineD
         ]
       : [binary, [...args]];
 
-  let login: ChildProcess | undefined;
-  let worker: ChildProcess | undefined;
+  let login: NodeChildProcess.ChildProcess | undefined;
+  let worker: NodeChildProcess.ChildProcess | undefined;
   let wanted = false;
   let restartTimer: ReturnType<typeof setTimeout> | undefined;
   let state: CursorWorkerState = { running: false, pid: null, startedAt: null, lastExit: null };

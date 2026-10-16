@@ -678,7 +678,8 @@ export const make = Effect.gen(function* () {
   const projectStore = yield* ProjectStore.ProjectStoreV2;
   const baseDir = path.resolve(serverConfig.baseDir);
   const worktreesDir = path.resolve(serverConfig.worktreesDir);
-  const foldWorktreeCase = (yield* HostProcess.Platform) === "win32";
+  const hostPlatform = yield* HostProcess.Platform;
+  const foldWorktreeCase = hostPlatform === "win32";
   const hostEnvironment = yield* HostProcess.Environment;
   const homeDir = yield* HostProcess.HomeDirectory;
   // `/private/tmp` is what macOS reports for sessions started in `/tmp`.

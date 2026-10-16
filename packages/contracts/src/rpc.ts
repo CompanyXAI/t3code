@@ -1955,7 +1955,7 @@ export class RpcScopeAuthorization extends RpcMiddleware.Service<RpcScopeAuthori
   { error: EnvironmentAuthorizationError },
 ) {}
 
-export const WsRpcGroup = RpcGroup.make(
+const WsRpcCoreGroup = RpcGroup.make(
   WsServerProbeRpc,
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,
@@ -2020,7 +2020,6 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerReportClientActivityRpc,
   WsServerReportHostPowerStateRpc,
   WsServerGetBackgroundPolicyRpc,
-  WsServerGetUsagePolicyStatusRpc,
   WsCloudGetRelayClientStatusRpc,
   WsCloudInstallRelayClientRpc,
   WsPullRequestsListRpc,
@@ -2074,16 +2073,6 @@ export const WsRpcGroup = RpcGroup.make(
   WsFilesystemBrowseRpc,
   WsFilesystemGetMetadataRpc,
   WsAgentSessionsScanRpc,
-  WsCursorAgentsListRpc,
-  WsCursorAgentsLaunchRpc,
-  WsCursorAgentsFollowUpRpc,
-  WsCursorAgentsStopRpc,
-  WsCursorAgentsApprovalsRpc,
-  WsCursorAgentsRespondApprovalRpc,
-  WsCursorAgentsHookSetupRpc,
-  WsCursorAgentsMachineRpc,
-  WsCursorAgentsProjectHooksRpc,
-  WsCursorAgentsFollowRpc,
   WsAgentSessionsImportRpc,
   WsAssetsCreateUrlRpc,
   WsAssetsPersistChatAttachmentsRpc,
@@ -2145,7 +2134,6 @@ export const WsRpcGroup = RpcGroup.make(
   WsSubscribeServerLifecycleRpc,
   WsSubscribeAuthAccessRpc,
   WsSubscribeBackgroundPolicyRpc,
-  WsSubscribeUsagePolicyStatusRpc,
   WsSubscribeResourceTelemetryRpc,
   WsOrchestrationV2DispatchCommandRpc,
   WsOrchestrationV2GetWorkflowScriptRpc,
@@ -2164,3 +2152,23 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationV2SubscribeThreadRpc,
   WsOrchestrationV2SubscribeCommandOutputRpc,
 ).middleware(RpcScopeAuthorization);
+
+// Kept separate so server `toLayer` stays under TypeScript's instantiation
+// depth. Clients still see one group.
+const WsRpcCursorGroup = RpcGroup.make(
+  WsServerGetUsagePolicyStatusRpc,
+  WsCursorAgentsListRpc,
+  WsCursorAgentsLaunchRpc,
+  WsCursorAgentsFollowUpRpc,
+  WsCursorAgentsStopRpc,
+  WsCursorAgentsFollowRpc,
+  WsCursorAgentsApprovalsRpc,
+  WsCursorAgentsRespondApprovalRpc,
+  WsCursorAgentsHookSetupRpc,
+  WsCursorAgentsProjectHooksRpc,
+  WsCursorAgentsMachineRpc,
+  WsSubscribeUsagePolicyStatusRpc,
+).middleware(RpcScopeAuthorization);
+
+export const WsRpcGroup = WsRpcCoreGroup.merge(WsRpcCursorGroup);
+export { WsRpcCoreGroup, WsRpcCursorGroup };

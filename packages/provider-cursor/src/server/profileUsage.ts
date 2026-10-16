@@ -1,5 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off -- runs `cursor-agent status` for the account guard.
-import { execFile } from "node:child_process";
+import * as NodeChildProcess from "node:child_process";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -40,16 +40,20 @@ export const defaultCursorProfileIdentity = (
       // Windows installs the CLI as a .cmd shim, which needs cmd.exe; the
       // command line is fixed, so no user input is ever concatenated.
       const [file, args] =
-        process.platform === "win32"
+        HostProcess.Platform.defaultValue() === "win32"
           ? [
               environment.ComSpec ?? process.env.ComSpec ?? "cmd.exe",
               ["/d", "/s", "/c", `${binary} status`],
             ]
           : [binary, ["status"]];
-      execFile(file, args, { env: environment, timeout: 20_000 }, (error, stdout, stderr) =>
-        error && !/logged in/i.test(`${stdout}${stderr}`)
-          ? reject(error)
-          : resolve(`${stdout}\n${stderr}`),
+      NodeChildProcess.execFile(
+        file,
+        args,
+        { env: environment, timeout: 20_000 },
+        (error, stdout, stderr) =>
+          error && !/logged in/i.test(`${stdout}${stderr}`)
+            ? reject(error)
+            : resolve(`${stdout}\n${stderr}`),
       );
     }),
 });

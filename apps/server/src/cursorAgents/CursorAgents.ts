@@ -34,6 +34,7 @@ import {
   cursorWorkerRoot,
 } from "@t3tools/provider-cursor/server/CursorMachine";
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as Stream from "effect/Stream";
 import * as NodePath from "node:path";
@@ -447,7 +448,7 @@ export const make = (deps: CursorAgentsDeps) => {
         const created = (deps.makeMachine ?? makeCursorMachine)(
           { homePath },
           {
-            platform: process.platform,
+            platform: yield* HostProcess.Platform,
             environment: process.env,
             home: NodeOS.homedir(),
             // Side by side in T3's state folder, one per instance, apart from the login.

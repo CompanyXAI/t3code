@@ -19,7 +19,7 @@
  * @module project/CursorIdeIndex
  */
 import * as NodeFS from "node:fs";
-import { Worker } from "node:worker_threads";
+import * as NodeWorkerThreads from "node:worker_threads";
 
 export interface CursorIdeComposerEntry {
   readonly composerId: string;
@@ -294,7 +294,7 @@ export async function loadCursorIdeIndex(
   if (key === null) return null;
   if (cache === null || cache.key !== key) {
     const index = new Promise<CursorIdeIndex>((resolve, reject) => {
-      const worker = new Worker(WORKER_SOURCE, {
+      const worker = new NodeWorkerThreads.Worker(WORKER_SOURCE, {
         eval: true,
         workerData: { globalDb, workspaceStorage },
       });

@@ -3,6 +3,7 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { describe, expect, it } from "vite-plus/test";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import {
   loadOrCreateBridgeState,
@@ -72,7 +73,7 @@ describe("persisted bridge state", () => {
       const first = await loadOrCreateBridgeState(file);
       expect(first.token).toHaveLength(64);
       // Windows has no POSIX modes; the user-profile ACL protects the file there.
-      if (process.platform !== "win32") {
+      if (HostProcess.Platform.defaultValue() !== "win32") {
         expect((await NodeFSP.stat(file)).mode & 0o777).toBe(0o600);
       }
       expect(await loadOrCreateBridgeState(file)).toEqual(first);

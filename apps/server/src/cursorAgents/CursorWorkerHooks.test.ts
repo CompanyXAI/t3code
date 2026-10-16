@@ -4,6 +4,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { makeCursorWorkerApprovals } from "@t3tools/provider-cursor/server/CursorWorkerApprovals";
 
 import * as CursorWorkerHooks from "./CursorWorkerHooks.ts";
@@ -45,7 +46,7 @@ describe("CursorWorkerHooks", () => {
         const text = yield* Effect.promise(() => NodeFSP.readFile(envFile, "utf8"));
         assert.include(text, 'T3_CURSOR_HOOK_TOKEN="secret-token"');
         const mode = (yield* Effect.promise(() => NodeFSP.stat(envFile))).mode & 0o777;
-        if (process.platform !== "win32") assert.equal(mode, 0o600);
+        if ((yield* HostProcess.Platform) !== "win32") assert.equal(mode, 0o600);
       }),
     ),
   );
