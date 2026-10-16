@@ -40,12 +40,13 @@ export function BranchName({
     isRedactionRevealed(redactionState, "machine", redactionItemKey("machine", value));
   if (revealed) return <MiddleTruncate value={value} className={className} {...props} />;
   return (
-    <MiddleTruncate
-      {...props}
-      value={redactedPlaceholder(value)}
-      showTitle={false}
-      aria-label="Branch name hidden (contains a machine name)"
-      className={cn("select-none blur-xs", className)}
-    />
+    <span className={cn("select-none blur-xs", className)}>
+      <MiddleTruncate
+        {...props}
+        value={redactedPlaceholder(value)}
+        showTitle={false}
+        aria-label="Branch name hidden (contains a machine name)"
+      />
+    </span>
   );
 }

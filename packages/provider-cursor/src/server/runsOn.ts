@@ -9,7 +9,7 @@
  *   (started from the Cursor agents page). Visible in Cursor.
  * - `cloud`: Cursor-hosted Cloud Agent. Visible in Cursor.
  */
-import { execFile } from "node:child_process";
+import * as NodeChildProcess from "node:child_process";
 import * as NodePath from "node:path";
 
 import type { ModelSelection, ProviderOptionSelection } from "@t3tools/contracts";
@@ -64,7 +64,7 @@ export function workerNameOf(commandLine: string): string | undefined {
 
 const git = (cwd: string, args: ReadonlyArray<string>) =>
   new Promise<string>((resolve, reject) =>
-    execFile("git", [...args], { cwd, timeout: 15_000 }, (error, stdout) =>
+    NodeChildProcess.execFile("git", [...args], { cwd, timeout: 15_000 }, (error, stdout) =>
       error ? reject(error) : resolve(stdout.trim()),
     ),
   );

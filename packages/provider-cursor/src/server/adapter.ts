@@ -194,7 +194,7 @@ export interface CursorRuntimeAgentPolicy {
 
 export function cursorRuntimeAgentPolicy(
   runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
-  platform: NodeJS.Platform = process.platform,
+  platform: NodeJS.Platform = HostProcess.Platform.defaultValue(),
 ): CursorRuntimeAgentPolicy {
   const sandboxPolicyType =
     typeof runtimePolicy.sandboxPolicy === "object" &&
@@ -307,9 +307,6 @@ function nativeThreadId(providerThread: OrchestrationV2ProviderThread): string {
  * Every Cursor settings layer the Cursor CLI loads: project and user rules,
  * skills, hooks, and MCP servers, team and MDM admin policy, and account
  * plugins. The SDK loads none of them when `settingSources` is omitted.
- * Sandbox policy files are read either way, and hooks can only deny or ask
- * (which local SDK runs reject), so these layers do not loosen the sandbox or
- * approval mode T3 sets.
  */
 const CURSOR_AGENT_SETTING_SOURCES = [
   "project",
@@ -899,7 +896,6 @@ interface ActiveCursorTurn {
   readonly providerTurnId: OrchestrationV2ProviderTurn["id"];
   readonly startedAt: DateTime.Utc;
   readonly completed: Deferred.Deferred<void, never>;
-  // Item ordinals allocated in this turn. No later turn looks items up here.
   readonly itemOrdinals: Map<string, number>;
   readonly tools: Map<string, ActiveCursorToolCall>;
   readonly subagents: Map<string, ActiveCursorSubagent>;
@@ -1392,7 +1388,6 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
         const emitToolArtifacts = Effect.fnUntraced(function* (input: {
           readonly active: ActiveCursorToolCall;
           readonly completed: boolean;
-          /** Terminal status for a tool the turn ended before Cursor completed it. */
           readonly unfinishedStatus?: "interrupted" | "failed" | "cancelled";
         }) {
           const { active } = input;
@@ -1500,8 +1495,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
                 toolCall.result?.status === "success" &&
                 toolCall.result.value.diffString !== undefined
                   ? { diffStr: toolCall.result.value.diffString }
-                  : // A failed change keeps its error where the diff would be.
-                    toolCall.result?.status === "error" && outputText.trim().length > 0
+                  : toolCall.result?.status === "error" && outputText.trim().length > 0
                     ? { diffStr: outputText }
                     : {}),
                 ...(toolCall.type === "write" ? { newStr: toolCall.args.fileText } : {}),
@@ -1533,7 +1527,6 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
                     : toolCall.type === "semSearch"
                       ? toolCall.args.targetDirectories?.join(", ")
                       : pattern;
-              // A failed search keeps its error as one row under the searched path.
               const results =
                 toolCall.result?.status === "error" && outputText.trim().length > 0
                   ? [{ fileName: searchPath?.trim() || ".", preview: outputText }]
@@ -2290,8 +2283,6 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
           }
           input.context.finalized = true;
           const completedAt = yield* DateTime.now;
-          // Tools still here never got a tool-call-completed. A stopped or
-          // failed turn cut them short, so they end with the turn's status.
           for (const tool of input.context.tools.values()) {
             yield* emitToolArtifacts({
               active: tool,
@@ -2300,9 +2291,6 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
             });
           }
           input.context.tools.clear();
-          // This interaction stops delivering updates at finalization. Tasks
-          // without a completion have an unknown outcome. Background launch
-          // acknowledgements have already settled their rows.
           for (const subagent of input.context.subagents.values()) {
             if (!isOrchestrationV2WorkActive(subagent.task.status)) continue;
             yield* emitSubagent({
@@ -2407,44 +2395,53 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
             return Effect.succeed({ kind: "local" });
           }
           const cwd = openInput.runtimePolicy.cwd;
-          return Effect.tryPromise({
-            try: async (): Promise<CursorAgentTarget> => {
-              if (cwd === null) {
-                throw new Error(
-                  "Pick a project first: a worker or cloud agent needs its git repo.",
-                );
-              }
-              const repo = await gitRepoTarget(cwd);
-              if (runsOn === "cloud") {
-                return { kind: "remote", runsOn, instanceId: adapterOptions.instanceId, ...repo };
-              }
-              const workerName =
-                adapterOptions.stateDir === undefined
-                  ? undefined
-                  : await runningWorkerName(
-                      cursorWorkerRoot(adapterOptions.stateDir, adapterOptions.instanceId),
-                      process.platform as Parameters<typeof runningWorkerName>[1],
-                      adapterOptions.environment,
+          return HostProcess.Platform.pipe(
+            Effect.flatMap((platform) =>
+              Effect.tryPromise({
+                try: async (): Promise<CursorAgentTarget> => {
+                  if (cwd === null) {
+                    throw new Error(
+                      "Pick a project first: a worker or cloud agent needs its git repo.",
                     );
-              if (workerName === undefined) {
-                throw new Error(
-                  "No worker is running for this account. Start it on the Cursor agents page first",
-                );
-              }
-              return {
-                kind: "remote",
-                runsOn,
-                workerName,
-                instanceId: adapterOptions.instanceId,
-                ...repo,
-              };
-            },
-            catch: (cause) =>
-              new ProviderAdapter.ProviderAdapterProtocolError({
-                driver: CursorAgentSdk.CURSOR_PROVIDER,
-                detail: cause instanceof Error ? cause.message : String(cause),
+                  }
+                  const repo = await gitRepoTarget(cwd);
+                  if (runsOn === "cloud") {
+                    return {
+                      kind: "remote",
+                      runsOn,
+                      instanceId: adapterOptions.instanceId,
+                      ...repo,
+                    };
+                  }
+                  const workerName =
+                    adapterOptions.stateDir === undefined
+                      ? undefined
+                      : await runningWorkerName(
+                          cursorWorkerRoot(adapterOptions.stateDir, adapterOptions.instanceId),
+                          platform as Parameters<typeof runningWorkerName>[1],
+                          adapterOptions.environment,
+                        );
+                  if (workerName === undefined) {
+                    throw new Error(
+                      "No worker is running for this account. Start it on the Cursor agents page first",
+                    );
+                  }
+                  return {
+                    kind: "remote",
+                    runsOn,
+                    workerName,
+                    instanceId: adapterOptions.instanceId,
+                    ...repo,
+                  };
+                },
+                catch: (cause) =>
+                  new ProviderAdapter.ProviderAdapterProtocolError({
+                    driver: CursorAgentSdk.CURSOR_PROVIDER,
+                    detail: cause instanceof Error ? cause.message : String(cause),
+                  }),
               }),
-          });
+            ),
+          );
         };
 
         const openAgent = Effect.fnUntraced(function* (openInput: {
@@ -2866,8 +2863,6 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
           interruptTurn: Effect.fn("CursorAdapterV2.interruptTurn")(
             function* (turnInput: ProviderAdapter.ProviderAdapterV2InterruptInput) {
               const context = yield* Ref.get(activeTurn);
-              // Stop on a settled turn: finalization already ended its tools
-              // and subagents, so nothing of it is left running to stop.
               if (context === null && turnInput.requestRuntimeRestart === true) return;
               if (context?.providerTurnId !== turnInput.providerTurnId) {
                 return yield* new ProviderAdapter.ProviderAdapterProtocolError({

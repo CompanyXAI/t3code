@@ -226,18 +226,20 @@ function CursorAgentsView({ environmentId }: { readonly environmentId: Environme
                   <div className="flex items-center gap-2">
                     <span className="truncate text-sm font-medium">{entry.name}</span>
                     <div className="flex-1" />
-                    <Badge variant={runtime.variant} className="max-w-full gap-0.5 truncate">
-                      <span>{runtime.kindLabel}</span>
-                      {runtime.environmentName ? (
-                        <>
-                          <span aria-hidden="true"> · </span>
-                          <RedactedSensitiveText
-                            value={runtime.environmentName}
-                            {...MACHINE_NAME_REDACT_PROPS}
-                            className="text-inherit"
-                          />
-                        </>
-                      ) : null}
+                    <Badge variant={runtime.variant} className="max-w-full">
+                      <span className="flex min-w-0 items-center gap-0.5 truncate">
+                        <span>{runtime.kindLabel}</span>
+                        {runtime.environmentName ? (
+                          <>
+                            <span aria-hidden="true"> · </span>
+                            <RedactedSensitiveText
+                              value={runtime.environmentName}
+                              {...MACHINE_NAME_REDACT_PROPS}
+                              className="text-inherit"
+                            />
+                          </>
+                        ) : null}
+                      </span>
                     </Badge>
                     <Badge variant={status.variant}>{status.label}</Badge>
                   </div>
@@ -645,19 +647,21 @@ function AccountOverview({
               <Badge
                 key={`${machine.runtime}:${machine.name}`}
                 variant="outline"
-                className="max-w-full gap-0.5 truncate"
+                className="max-w-full"
               >
-                <MachineRunsOnIcon
-                  runtime={machine.runtime}
-                  machine={machine.name}
-                  account={account.label}
-                />
-                <RedactedSensitiveText
-                  value={machine.name}
-                  {...MACHINE_NAME_REDACT_PROPS}
-                  className="text-inherit"
-                />
-                <span className="text-muted-foreground">{machine.agents}</span>
+                <span className="flex min-w-0 items-center gap-0.5 truncate">
+                  <MachineRunsOnIcon
+                    runtime={machine.runtime}
+                    machine={machine.name}
+                    account={account.label}
+                  />
+                  <RedactedSensitiveText
+                    value={machine.name}
+                    {...MACHINE_NAME_REDACT_PROPS}
+                    className="text-inherit"
+                  />
+                  <span className="text-muted-foreground">{machine.agents}</span>
+                </span>
               </Badge>
             ))}
           </div>

@@ -62,7 +62,7 @@ export function CursorMachinePanel({
     value.trim() === "" ||
     isRedactionRevealed(redaction, category, redactionItemKey(category, value.trim()))
       ? undefined
-      : "blur-xs focus:blur-none";
+      : "blur-xs focus-within:blur-none";
 
   const polled = Option.getOrNull(AsyncResult.value(result));
   const state = override ?? polled;
@@ -166,20 +166,22 @@ export function CursorMachinePanel({
         </Button>
       </div>
       <div className="grid gap-1 sm:grid-cols-3">
-        <Input
-          aria-label="Worker name"
-          placeholder="Worker name"
-          className={fieldBlur("machine", name)}
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-        />
-        <Input
-          aria-label="Worker folder"
-          placeholder="Worker folder (absolute)"
-          className={fieldBlur("path", workerDir)}
-          value={workerDir}
-          onChange={(e) => setWorkerDir(e.target.value)}
-        />
+        <span className={fieldBlur("machine", name)}>
+          <Input
+            aria-label="Worker name"
+            placeholder="Worker name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+          />
+        </span>
+        <span className={fieldBlur("path", workerDir)}>
+          <Input
+            aria-label="Worker folder"
+            placeholder="Worker folder (absolute)"
+            value={workerDir}
+            onChange={(e) => setWorkerDir(e.target.value)}
+          />
+        </span>
         <Input
           aria-label="Worker labels"
           placeholder="Labels key=value"

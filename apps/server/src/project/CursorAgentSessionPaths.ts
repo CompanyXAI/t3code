@@ -19,6 +19,7 @@
  * @module project/CursorAgentSessionPaths
  */
 import * as NodeOS from "node:os";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import type * as Path from "effect/Path";
@@ -62,7 +63,7 @@ export function parseCursorWorkspaceFolder(body: string): string | null {
 /** Cursor IDE workspaceStorage (VS Code user-data layout) for this OS user. */
 export function cursorIdeWorkspaceStorageDir(
   pathApi: Path.Path,
-  platform: NodeJS.Platform = process.platform,
+  platform: NodeJS.Platform = HostProcess.Platform.defaultValue(),
   env: NodeJS.ProcessEnv = process.env,
   home: string = NodeOS.homedir(),
 ): string {

@@ -11,7 +11,7 @@
  *
  * @module server/cursorAgents/CursorAgentIndex
  */
-import * as FS from "node:fs/promises";
+import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import type { CursorDirectoryEntry } from "@t3tools/provider-cursor/server/CursorAgentDirectory";
 
@@ -69,7 +69,7 @@ export const fileStorage = (dir: string): CursorIndexStorage => {
     NodePath.join(dir, `${accountId.replace(/[^A-Za-z0-9_.-]/g, "_")}.json`);
   return {
     load: (accountId) =>
-      FS.readFile(fileOf(accountId), "utf8").then(
+      NodeFSP.readFile(fileOf(accountId), "utf8").then(
         (text) => {
           const parsed = JSON.parse(text) as Partial<CursorIndexSnapshot> | null;
           return parsed?.version === 1 &&
@@ -81,11 +81,11 @@ export const fileStorage = (dir: string): CursorIndexStorage => {
         () => undefined,
       ),
     save: async (snapshot) => {
-      await FS.mkdir(dir, { recursive: true });
+      await NodeFSP.mkdir(dir, { recursive: true });
       const file = fileOf(snapshot.accountId);
       const temp = `${file}.${process.pid}.tmp`;
-      await FS.writeFile(temp, JSON.stringify(snapshot));
-      await FS.rename(temp, file);
+      await NodeFSP.writeFile(temp, JSON.stringify(snapshot));
+      await NodeFSP.rename(temp, file);
     },
   };
 };

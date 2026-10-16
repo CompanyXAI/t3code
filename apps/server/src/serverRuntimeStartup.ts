@@ -268,8 +268,6 @@ export const resolveAutoBootstrapWelcomeTargets = Effect.gen(function* () {
   let bootstrapThreadId: ThreadId | undefined;
 
   if (serverConfig.autoBootstrapProjectFromCwd) {
-    // Project creation has no user model choice; only the bootstrap thread
-    // gets an automatic selection, and an explicit project default wins.
     const threadModelSelection = getAutoBootstrapThreadModelSelection();
     const { project } = yield* projects.bootstrap({
       commandId: CommandId.make(yield* randomUUID),
@@ -319,15 +317,16 @@ export const resolveAutoBootstrapWelcomeTargets = Effect.gen(function* () {
             creationSource: "server",
           })
           .pipe(
-            Effect.catchTag("ThreadManagementProviderInstanceDisabledError", (error) =>
-              Effect.logWarning(
-                "Skipped auto-bootstrap thread; provider instance is disabled for project",
-                {
-                  projectId: error.projectId,
-                  instanceId: error.instanceId,
-                },
-              ).pipe(Effect.as(undefined)),
-            ),
+            Effect.catchTags({
+              ThreadManagementProviderInstanceDisabledError: (error) =>
+                Effect.logWarning(
+                  "Skipped auto-bootstrap thread; provider instance is disabled for project",
+                  {
+                    projectId: error.projectId,
+                    instanceId: error.instanceId,
+                  },
+                ).pipe(Effect.as(undefined)),
+            }),
           );
         if (launched !== undefined) {
           bootstrapThreadId = launched.threadId;
@@ -444,7 +443,6 @@ export function runOrderedV2StartupPhases<
 >(input: {
   readonly importLegacyShells: Effect.Effect<Import, ImportError, ImportContext>;
   readonly recover: Effect.Effect<Recovery, RecoveryError, RecoveryContext>;
-  /** Settles delegated tasks whose runs recovery just terminalized. */
   readonly recoverDelegatedTasks: Effect.Effect<void, DelegationError, DelegationContext>;
   readonly startEffectWorker: Effect.Effect<void, WorkerError, WorkerContext>;
   readonly autoBootstrap: Effect.Effect<Bootstrap, BootstrapError, BootstrapContext>;

@@ -148,7 +148,7 @@ function decodeScalar(code: number, field: Field): unknown {
   // bytes: text when it is valid UTF-8 without control noise, else hex (often blob ids).
   try {
     const text = UTF8.decode(bytes);
-    // eslint-disable-next-line no-control-regex
+    // eslint-disable-next-line no-control-regex -- control characters mean the field is binary, not text
     if (!/[\u0000-\u0008\u000e-\u001f]/.test(text)) return text;
   } catch {}
   return hex(bytes);
