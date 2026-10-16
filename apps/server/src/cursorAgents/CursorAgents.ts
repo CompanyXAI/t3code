@@ -36,9 +36,12 @@ import {
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 import * as NodePath from "node:path";
 
+import * as ServerConfig from "../config.ts";
+import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import * as CursorAgentIndex from "./CursorAgentIndex.ts";
 import { registerCursorAgentsRefresh } from "./CursorAgentsRefresh.ts";
 
@@ -54,6 +57,11 @@ export interface CursorAgentsDeps {
   ) => CursorMachine;
   /** Server state folder; the agent index is kept there. In memory when omitted. */
   readonly stateDir?: string;
+  /**
+   * Re-read CLI login and worker state on the scheduler tick. Only the
+   * server-wide instance does this; connections read what it cached.
+   */
+  readonly backgroundMachineRefresh?: boolean;
 }
 
 /** The instance's name, else its id, as everywhere in T3. */
@@ -102,12 +110,40 @@ export function toContractEntry(
 type MachineEntry = { machine: CursorMachine; sdkEmail: string | undefined };
 const processMachines = new Map<string, MachineEntry>();
 
+/** CLI login and worker state is re-read in the background at most this often. */
+const MACHINE_REFRESH_MS = 5 * 60_000;
+const LOCAL_REFRESH_MS = 20_000;
+
 /**
- * One agent index per state folder for the whole server process: `make`
- * runs once per WebSocket connection, but all of them share the snapshots
- * and at most one sync per account.
+ * The in-memory Cursor state of the whole server process, one per state
+ * folder: `make` runs once per WebSocket connection (and once at startup),
+ * but all of them read and fill the same snapshots, with at most one sync per
+ * account. The scheduler fills it; requests only read it.
  */
-const processIndexes = new Map<string, CursorAgentIndex.CursorAgentIndex>();
+interface SharedCursorState {
+  readonly index: CursorAgentIndex.CursorAgentIndex;
+  localCwds: ReadonlyArray<string>;
+  localCache: ReadonlyArray<CursorAgentDirectory.CursorDirectoryEntry>;
+  lastLocalAt: number;
+  readonly machineStates: Map<string, CursorMachineState>;
+  /** Each account's API key as the last tick read it, so listing loads no credentials. */
+  readonly apiKeys: Map<string, string>;
+  machinesAt: number;
+  machinesInFlight: Promise<void> | undefined;
+}
+
+const sharedStateFor = (index: CursorAgentIndex.CursorAgentIndex): SharedCursorState => ({
+  index,
+  localCwds: [],
+  localCache: [],
+  lastLocalAt: 0,
+  machineStates: new Map(),
+  apiKeys: new Map(),
+  machinesAt: 0,
+  machinesInFlight: undefined,
+});
+
+const processStates = new Map<string, SharedCursorState>();
 
 /** Own-worker detection depends on the names entered on the page, so it is applied on read. */
 function withOwnMachines(
@@ -129,18 +165,21 @@ function withOwnMachines(
 }
 
 export const make = (deps: CursorAgentsDeps) => {
-  const index =
+  const shared =
     deps.stateDir === undefined
-      ? new CursorAgentIndex.CursorAgentIndex(CursorAgentIndex.memoryStorage())
-      : (processIndexes.get(deps.stateDir) ??
-        processIndexes
+      ? sharedStateFor(new CursorAgentIndex.CursorAgentIndex(CursorAgentIndex.memoryStorage()))
+      : (processStates.get(deps.stateDir) ??
+        processStates
           .set(
             deps.stateDir,
-            new CursorAgentIndex.CursorAgentIndex(
-              CursorAgentIndex.fileStorage(NodePath.join(deps.stateDir, "cursor-agent-index")),
+            sharedStateFor(
+              new CursorAgentIndex.CursorAgentIndex(
+                CursorAgentIndex.fileStorage(NodePath.join(deps.stateDir, "cursor-agent-index")),
+              ),
             ),
           )
           .get(deps.stateDir)!);
+  const index = shared.index;
 
   const syncFor = (
     account: CursorAgentDirectory.CursorDirectoryAccount,
@@ -198,33 +237,53 @@ export const make = (deps: CursorAgentsDeps) => {
       }),
     );
 
-  let localCwds: ReadonlyArray<string> = [];
-  let localCache: ReadonlyArray<CursorAgentDirectory.CursorDirectoryEntry> = [];
-  let lastLocalAt = 0;
-
   const refresh = Effect.fn("CursorAgents.refresh")(function* () {
     const instances = yield* cursorInstances;
     const ready: Array<CursorAgentDirectory.CursorDirectoryAccount> = [];
     for (const instance of instances) {
       const account = yield* accountOf(instance, {
-        ...(localCwds.length === 0 ? {} : { localCwds }),
+        ...(shared.localCwds.length === 0 ? {} : { localCwds: shared.localCwds }),
       }).pipe(Effect.timeout("15 seconds"), Effect.result);
-      if (account._tag === "Success") ready.push(account.success);
+      if (account._tag === "Success") {
+        ready.push(account.success);
+        shared.apiKeys.set(instance.instanceId, account.success.apiKey);
+      } else shared.apiKeys.delete(instance.instanceId);
     }
     for (const account of ready) {
       yield* Effect.promise(() => index.kick(account.accountId, syncFor(account)));
     }
     const now = yield* Effect.clockWith((clock) => clock.currentTimeMillis);
+    // CLI login and worker state spawn `cursor-agent status` per account, so
+    // they are read off the tick, every few minutes, and the page reads memory.
+    const machinesMissing = instances.some(
+      (instance) => !shared.machineStates.has(instance.instanceId),
+    );
+    if (
+      deps.backgroundMachineRefresh === true &&
+      shared.machinesInFlight === undefined &&
+      (machinesMissing || now - shared.machinesAt >= MACHINE_REFRESH_MS)
+    ) {
+      shared.machinesAt = now;
+      const platform = yield* HostProcess.Platform;
+      shared.machinesInFlight = Effect.runPromise(
+        refreshMachines(instances).pipe(Effect.provideService(HostProcess.Platform, platform)),
+      ).finally(() => {
+        shared.machinesInFlight = undefined;
+      });
+    }
     const localOwner = ready[0];
-    if (localOwner !== undefined && localCwds.length > 0 && now - lastLocalAt >= 20_000) {
-      lastLocalAt = now;
-      localCache = yield* deps.directory.listLocal(localOwner).pipe(
+    if (
+      localOwner !== undefined &&
+      shared.localCwds.length > 0 &&
+      now - shared.lastLocalAt >= LOCAL_REFRESH_MS
+    ) {
+      shared.lastLocalAt = now;
+      shared.localCache = yield* deps.directory.listLocal(localOwner).pipe(
         Effect.timeout("30 seconds"),
         Effect.orElseSucceed(() => []),
       );
     }
   });
-  registerCursorAgentsRefresh(refresh());
 
   const list = (input: CursorAgentsListInput) =>
     Effect.gen(function* () {
@@ -236,12 +295,23 @@ export const make = (deps: CursorAgentsDeps) => {
       const failures: Array<CursorAgentsListResult["failures"][number]> = [];
       const ready: Array<CursorAgentDirectory.CursorDirectoryAccount> = [];
       for (const instance of instances) {
-        const account = yield* accountOf(instance, {
+        const extra = {
           ...(input.localCwds === undefined ? {} : { localCwds: input.localCwds }),
           ...(input.ownMachineNames === undefined
             ? {}
             : { ownMachineNames: input.ownMachineNames }),
-        }).pipe(Effect.timeout("15 seconds"), Effect.result);
+        };
+        const cachedKey = shared.apiKeys.get(instance.instanceId);
+        const account = yield* (
+          cachedKey === undefined
+            ? accountOf(instance, extra)
+            : Effect.succeed<CursorAgentDirectory.CursorDirectoryAccount>({
+                accountId: instance.instanceId,
+                label: instanceLabel(instance),
+                apiKey: cachedKey,
+                ...extra,
+              })
+        ).pipe(Effect.timeout("15 seconds"), Effect.result);
         if (account._tag === "Success") ready.push(account.success);
         else
           failures.push({
@@ -250,7 +320,7 @@ export const make = (deps: CursorAgentsDeps) => {
           });
       }
       // The page only reads the cache. The scheduler fills it.
-      if (input.localCwds !== undefined) localCwds = input.localCwds;
+      if (input.localCwds !== undefined) shared.localCwds = input.localCwds;
       const ownMachineNames = input.ownMachineNames ?? [];
       const perAccount = yield* Effect.forEach(
         ready,
@@ -273,7 +343,7 @@ export const make = (deps: CursorAgentsDeps) => {
       // Local agents come from this computer's Cursor store, which every
       // login shares and which records no account: they belong to all
       // accounts, are listed once and are opened with the first ready login.
-      const localEntries = localCache;
+      const localEntries = shared.localCache;
       const cloudEntries = perAccount
         .flatMap(({ state }) => state.snapshot?.entries ?? [])
         .map((entry) => withOwnMachines(entry, ownMachineNames));
@@ -435,22 +505,23 @@ export const make = (deps: CursorAgentsDeps) => {
   const machines =
     deps.makeMachine === undefined ? processMachines : new Map<string, MachineEntry>();
 
-  const machine = (input: CursorMachineInput) =>
+  /** The SDK login's email, from the agent index when it has one (no network call). */
+  const sdkEmailOf = (instanceId: ProviderInstanceId) =>
+    Effect.promise(() => index.peek(instanceId)).pipe(
+      Effect.flatMap((state) =>
+        state.snapshot?.email
+          ? Effect.succeed<string | undefined>(state.snapshot.email)
+          : accountFor("machine", instanceId).pipe(
+              Effect.flatMap((account) => deps.directory.accountEmail(account)),
+            ),
+      ),
+      Effect.orElseSucceed((): string | undefined => undefined),
+    );
+
+  const controllerFor = (instance: ProviderInstance, sdkEmail: string | undefined) =>
     Effect.gen(function* () {
-      const fail = (detail: string) => new CursorAgentsError({ operation: "machine", detail });
-      const instances = yield* cursorInstances;
-      const instance = instances.find((candidate) => candidate.instanceId === input.instanceId);
-      if (instance === undefined) {
-        return yield* fail(`Cursor account ${input.instanceId} is not enabled.`);
-      }
       const homePath = instance.homePath ?? "";
-      // Without an SDK login the email stays unknown: CLI sign-in and status
-      // still work, while the guard keeps workers and logon tasks blocked.
-      const sdkEmail = yield* accountFor("machine", input.instanceId).pipe(
-        Effect.flatMap((account) => deps.directory.accountEmail(account)),
-        Effect.orElseSucceed(() => undefined),
-      );
-      const key = `${input.instanceId}\u0000${homePath}`;
+      const key = `${instance.instanceId}\u0000${homePath}`;
       let entry = machines.get(key);
       if (entry === undefined) {
         const holder: { machine?: CursorMachine; sdkEmail: string | undefined } = { sdkEmail };
@@ -463,7 +534,7 @@ export const make = (deps: CursorAgentsDeps) => {
             // Side by side in T3's state folder, one per instance, apart from the login.
             workerRoot: cursorWorkerRoot(
               deps.stateDir ?? NodePath.join(NodeOS.homedir(), ".t3", "userdata"),
-              input.instanceId,
+              instance.instanceId,
             ),
             sdkEmail: async () => holder.sdkEmail,
           },
@@ -472,16 +543,82 @@ export const make = (deps: CursorAgentsDeps) => {
         machines.set(key, entry);
       }
       entry.sdkEmail = sdkEmail;
-      const controller = entry.machine;
+      return entry.machine;
+    });
+
+  const failMachine = (detail: string) => new CursorAgentsError({ operation: "machine", detail });
+  const attempt = <A>(run: () => Promise<A>) =>
+    Effect.tryPromise({
+      try: run,
+      catch: (cause) => failMachine(cause instanceof Error ? cause.message : String(cause)),
+    });
+
+  /** Reads CLI login, worker and logon task (spawns processes) and caches the result. */
+  const readMachineState = (
+    instance: ProviderInstance,
+    controller: CursorMachine,
+    loginUrl: string | null,
+  ) =>
+    Effect.gen(function* () {
+      const state = yield* attempt(() => controller.status());
+      const logonTask = yield* attempt(() => controller.logonTaskInstalled(instance.instanceId));
+      const result = {
+        instanceId: instance.instanceId,
+        homePath: state.homeDir,
+        cliEmail: state.cliEmail,
+        check: state.check,
+        problem: state.problem,
+        loginPending: state.loginPending,
+        standardLogin: state.standardLogin,
+        loginUrl,
+        worker: state.worker,
+        logonTask,
+        logonTaskName: logonTaskName(instance.instanceId),
+      } satisfies CursorMachineState;
+      // A login URL belongs to the request that started the login, not to the cache.
+      shared.machineStates.set(instance.instanceId, { ...result, loginUrl: null });
+      return result;
+    });
+
+  function refreshMachines(instances: ReadonlyArray<ProviderInstance>) {
+    return Effect.forEach(
+      instances,
+      (instance) =>
+        sdkEmailOf(instance.instanceId).pipe(
+          Effect.flatMap((sdkEmail) => controllerFor(instance, sdkEmail)),
+          Effect.flatMap((controller) => readMachineState(instance, controller, null)),
+          Effect.ignore,
+        ),
+      { discard: true },
+    );
+  }
+
+  const machine = (input: CursorMachineInput) =>
+    Effect.gen(function* () {
+      const instances = yield* cursorInstances;
+      const instance = instances.find((candidate) => candidate.instanceId === input.instanceId);
+      if (instance === undefined) {
+        return yield* failMachine(`Cursor account ${input.instanceId} is not enabled.`);
+      }
+      if (input.action === "status") {
+        // Served from memory; the scheduler keeps it fresh.
+        const cached = shared.machineStates.get(input.instanceId);
+        if (cached !== undefined) return cached;
+        const inFlight = shared.machinesInFlight;
+        if (inFlight !== undefined) {
+          yield* Effect.promise(() => inFlight);
+          const filled = shared.machineStates.get(input.instanceId);
+          if (filled !== undefined) return filled;
+        }
+      }
+      // Without an SDK login the email stays unknown: CLI sign-in and status
+      // still work, while the guard keeps workers and logon tasks blocked.
+      const sdkEmail = yield* sdkEmailOf(input.instanceId);
+      const controller = yield* controllerFor(instance, sdkEmail);
       const needWorker = () =>
         input.worker === undefined
-          ? Effect.fail(fail("Worker name, folder and labels are required."))
+          ? Effect.fail(failMachine("Worker name, folder and labels are required."))
           : Effect.succeed(input.worker);
-      const attempt = <A>(run: () => Promise<A>) =>
-        Effect.tryPromise({
-          try: run,
-          catch: (cause) => fail(cause instanceof Error ? cause.message : String(cause)),
-        });
       let loginUrl: string | null = null;
       switch (input.action) {
         case "status":
@@ -509,21 +646,7 @@ export const make = (deps: CursorAgentsDeps) => {
           yield* attempt(() => controller.uninstallLogonTask(input.instanceId));
           break;
       }
-      const state = yield* attempt(() => controller.status());
-      const logonTask = yield* attempt(() => controller.logonTaskInstalled(input.instanceId));
-      return {
-        instanceId: input.instanceId,
-        homePath: state.homeDir,
-        cliEmail: state.cliEmail,
-        check: state.check,
-        problem: state.problem,
-        loginPending: state.loginPending,
-        standardLogin: state.standardLogin,
-        loginUrl,
-        worker: state.worker,
-        logonTask,
-        logonTaskName: logonTaskName(input.instanceId),
-      } satisfies CursorMachineState;
+      return yield* readMachineState(instance, controller, loginUrl);
     });
 
   return {
@@ -539,3 +662,21 @@ export const make = (deps: CursorAgentsDeps) => {
 };
 
 export type CursorAgents = ReturnType<typeof make>;
+
+/**
+ * Builds the shared Cursor state at server start and hands its refresh to the
+ * scheduler tick, so the first page load already finds agents, accounts and
+ * machine state in memory instead of waiting for a connection to register it.
+ */
+export const layerWarmup = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const providerInstances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
+    const agents = make({
+      listInstances: providerInstances.listInstances,
+      directory: yield* CursorAgentDirectory.makeLive,
+      stateDir: (yield* ServerConfig.ServerConfig).stateDir,
+      backgroundMachineRefresh: true,
+    });
+    registerCursorAgentsRefresh(agents.refresh);
+  }),
+);

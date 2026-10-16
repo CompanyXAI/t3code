@@ -233,6 +233,7 @@ function CursorAgentsView({ environmentId }: { readonly environmentId: Environme
                           <>
                             <span aria-hidden="true"> · </span>
                             <RedactedSensitiveText
+                              interactive={false}
                               value={runtime.environmentName}
                               {...MACHINE_NAME_REDACT_PROPS}
                               className="text-inherit"
@@ -428,6 +429,7 @@ function LaunchForm({
                 <>
                   <span aria-hidden="true">·</span>
                   <RedactedSensitiveText
+                    interactive={false}
                     value={emailOf(draft.instanceId)}
                     ariaLabel="Toggle account email visibility"
                     revealTooltip="Click to reveal email"
@@ -452,6 +454,7 @@ function LaunchForm({
                   <>
                     <span aria-hidden="true">·</span>
                     <RedactedSensitiveText
+                      interactive={false}
                       value={emailOf(account.instanceId)}
                       ariaLabel="Toggle account email visibility"
                       revealTooltip="Click to reveal email"

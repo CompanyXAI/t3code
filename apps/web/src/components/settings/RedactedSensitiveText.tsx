@@ -69,6 +69,12 @@ export function RedactedSensitiveText(props: {
   readonly className?: string;
   /** Defaults to the category implied by the prop set's aria label. */
   readonly category?: RedactionCategory;
+  /**
+   * False inside another control (row button, select trigger/item): renders the
+   * same text without its own reveal button, so buttons never nest. Reveal then
+   * goes through the header controls, as with `useRedactedDisplay`.
+   */
+  readonly interactive?: boolean;
 }) {
   const value = props.value?.trim();
   const category = props.category ?? redactionCategoryFor(props.ariaLabel);
@@ -78,17 +84,22 @@ export function RedactedSensitiveText(props: {
 
   if (!value) return null;
 
+  const className = cn(
+    "min-w-0 rounded-sm font-mono text-2xs leading-normal",
+    revealed ? "text-muted-foreground" : "select-none text-muted-foreground blur-xs",
+    props.className,
+  );
+  if (props.interactive === false) {
+    return <span className={className}>{revealed ? value : redacted}</span>;
+  }
+
   return (
     <Tooltip>
       <TooltipTrigger
         render={
           <button
             type="button"
-            className={cn(
-              "min-w-0 cursor-pointer rounded-sm font-mono text-2xs leading-normal transition hover:text-foreground",
-              revealed ? "text-muted-foreground" : "select-none text-muted-foreground blur-xs",
-              props.className,
-            )}
+            className={cn("cursor-pointer transition hover:text-foreground", className)}
             onClick={() =>
               updateRedactionState((state) => toggleRedactionItem(state, category, itemKey))
             }
