@@ -81,6 +81,7 @@ export const layer = (
               remove: Effect.sync(() => void credentials.delete(key)),
             };
           }),
+        recordUsagePolicy: () => Effect.void,
       });
       return Context.make(ProviderHost.ProviderHost, host).pipe(
         Context.add(TestProviderHostSettings, {

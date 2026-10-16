@@ -42,6 +42,26 @@
     "./server/CursorSdk": {
       "types": "./src/server/CursorSdk.ts",
       "import": "./src/server/CursorSdk.ts"
+    },
+    "./server/CursorAgentDirectory": {
+      "types": "./src/server/CursorAgentDirectory.ts",
+      "import": "./src/server/CursorAgentDirectory.ts"
+    },
+    "./server/CursorHookBridge": {
+      "types": "./src/server/CursorHookBridge.ts",
+      "import": "./src/server/CursorHookBridge.ts"
+    },
+    "./server/CursorApprovalHooks": {
+      "types": "./src/server/CursorApprovalHooks.ts",
+      "import": "./src/server/CursorApprovalHooks.ts"
+    },
+    "./server/CursorWorkerApprovals": {
+      "types": "./src/server/CursorWorkerApprovals.ts",
+      "import": "./src/server/CursorWorkerApprovals.ts"
+    },
+    "./server/CursorMachine": {
+      "types": "./src/server/CursorMachine.ts",
+      "import": "./src/server/CursorMachine.ts"
     }
   },
   "scripts": {

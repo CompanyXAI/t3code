@@ -2,8 +2,8 @@ import * as Schema from "effect/Schema";
 import { IsoDateTime, NonNegativeInt, ProjectId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 
-/** Coding agent home directories the scanner knows how to read. */
-export const AgentSessionSource = Schema.Literals(["claudeAgent", "codex"]);
+/** Coding agent homes the scanner knows how to read (Claude, Codex, Cursor). */
+export const AgentSessionSource = Schema.Literals(["claudeAgent", "codex", "cursor"]);
 export type AgentSessionSource = typeof AgentSessionSource.Type;
 
 /** File identity saved with an imported session so bounded retries can skip unchanged history. */
@@ -58,11 +58,37 @@ export const AgentSessionProjectCandidate = Schema.Struct({
    * from plain folders and should treat every candidate as a standalone project.
    */
   git: Schema.optionalKey(Schema.NullOr(AgentSessionProjectGit)),
+  /** Sessions in this directory, newest first, capped; threadCount is the full count. */
+  threads: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        source: AgentSessionSource,
+        providerSessionId: TrimmedNonEmptyString,
+        lastActiveAt: IsoDateTime,
+        title: Schema.optionalKey(Schema.String),
+        /** e.g. IDE, active, archived, draft, subagent, "not in any workspace list", SDK, CLI. */
+        labels: Schema.optionalKey(Schema.Array(Schema.String)),
+      }),
+    ),
+  ),
 });
 export type AgentSessionProjectCandidate = typeof AgentSessionProjectCandidate.Type;
 
+/**
+ * A session the scanner found but could not bind to a directory because no cwd
+ * is recorded for it (e.g. a Cursor transcript without chats meta.json cwd).
+ * Listed so the user sees it exists; it is never imported or resumed.
+ */
+export const AgentSessionOrphan = Schema.Struct({
+  source: AgentSessionSource,
+  providerSessionId: TrimmedNonEmptyString,
+  lastActiveAt: Schema.NullOr(IsoDateTime),
+});
+export type AgentSessionOrphan = typeof AgentSessionOrphan.Type;
+
 export const AgentSessionScanResult = Schema.Struct({
   candidates: Schema.Array(AgentSessionProjectCandidate),
+  orphans: Schema.optional(Schema.Array(AgentSessionOrphan)),
   scannedAt: IsoDateTime,
   truncated: Schema.optional(Schema.Boolean),
 });

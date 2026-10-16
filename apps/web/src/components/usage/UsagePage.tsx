@@ -701,6 +701,24 @@ export function UsagePage() {
                               ? `${formatPercent(share)} of cost · ${formatTokens(totals?.totalTokens ?? 0)} tokens`
                               : `${formatPercent(share)} of tokens · ${formatUsd(totals?.costUsd ?? 0)}`}
                           </span>
+                          {merged.accounts
+                            .filter((account) => account.provider === provider)
+                            .map((account) => (
+                              <div
+                                key={account.sourcePath}
+                                className={cn(
+                                  "flex items-baseline justify-between gap-4 pl-6 text-xs text-muted-foreground",
+                                  figureClass(providerLoading),
+                                )}
+                              >
+                                <span className="truncate">{account.label}</span>
+                                <span className="shrink-0 tabular-nums">
+                                  {metric === "cost"
+                                    ? formatUsd(account.costUsd)
+                                    : formatTokens(account.totalTokens)}
+                                </span>
+                              </div>
+                            ))}
                         </div>
                       );
                     })}

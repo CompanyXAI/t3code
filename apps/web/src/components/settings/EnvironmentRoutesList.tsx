@@ -30,6 +30,7 @@ import { useState } from "react";
 import { requestConfirmDialog } from "~/confirmDialog";
 import { environmentCatalog } from "~/connection/catalog";
 import { cn } from "~/lib/utils";
+import { HOST_URL_REDACT_PROPS, RedactedSensitiveText } from "./RedactedSensitiveText";
 import type { EnvironmentPresentation } from "~/state/environments";
 import { usePreparedConnection } from "~/state/session";
 import { useAtomCommand } from "~/state/use-atom-command";
@@ -184,7 +185,11 @@ function SortableRouteRow({
         </p>
         {address !== null ? (
           <p className="truncate text-2xs text-muted-foreground">
-            {address}
+            <RedactedSensitiveText
+              value={address}
+              {...HOST_URL_REDACT_PROPS}
+              className="truncate text-2xs text-muted-foreground"
+            />
             {isLearned(route) ? " · found automatically" : ""}
           </p>
         ) : null}

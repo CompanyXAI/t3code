@@ -46,10 +46,14 @@ function renderPendingActions(isRunning: boolean) {
   );
 }
 
-function renderSendButton(sendDisabledReason: string | null = null) {
+function renderSendButton(
+  sendDisabledReason: string | null = null,
+  nativeResumeUnavailableReason: string | null = null,
+) {
   return renderToStaticMarkup(
     createElement(ComposerPrimaryActions, {
       compact: true,
+      nativeResumeUnavailableReason,
       canOperateThread: true,
       pendingAction: null,
       isRunning: false,
@@ -75,6 +79,13 @@ afterEach(() => {
 });
 
 describe("ComposerPrimaryActions", () => {
+  it("shows the disabled resume button without compactable history (Cursor IDE import)", () => {
+    const markup = renderSendButton(null, "Imported from Cursor IDE");
+    expect(markup).toContain('aria-label="Resume unavailable"');
+    expect(markup).toContain('aria-description="Imported from Cursor IDE"');
+    expect(renderSendButton()).not.toContain("Resume unavailable");
+  });
+
   it("disables and labels the send button while feedback is uploading", () => {
     const markup = renderSendButton("Sending feedback");
 

@@ -12,8 +12,11 @@
 import type {
   BackgroundScope,
   ChatAttachment,
+  ProviderDriverKind,
+  ProviderInstanceId,
   ServerSettings,
   ServerSettingsError,
+  UsageTokenCounts,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
@@ -72,5 +75,16 @@ export class ProviderHost extends Context.Service<
       namespace: string,
       bindingId: string,
     ) => Effect.Effect<ProviderCredentials>;
+    /**
+     * Record a turn's token delta against T3 usage policies. No-op when the
+     * server has no policy service (tests) or no matching policy.
+     */
+    readonly recordUsagePolicy: (input: {
+      readonly instanceId: ProviderInstanceId;
+      readonly driverKind: ProviderDriverKind;
+      readonly model: string;
+      readonly authType?: string | null;
+      readonly delta: UsageTokenCounts;
+    }) => Effect.Effect<void>;
   }
 >()("@t3tools/provider-core/server/ProviderHost") {}

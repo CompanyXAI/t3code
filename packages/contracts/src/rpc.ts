@@ -21,6 +21,25 @@ import {
   ChatGptHandoffInput,
   ChatGptHandoffState,
 } from "./providerSetup.ts";
+import {
+  CursorAgentsError,
+  CursorAgentsFollowUpInput,
+  CursorAgentsLaunchInput,
+  CursorAgentsListInput,
+  CursorAgentsListResult,
+  CursorAgentsRunResult,
+  CursorAgentStreamEvent,
+  CursorAgentTarget,
+  CursorAgentsApprovalsResult,
+  CursorAgentsHookSetup,
+  CursorAgentsHookSetupInput,
+  CursorMachineInput,
+  CursorMachineState,
+  CursorAgentsProjectHooksInput,
+  CursorAgentsProjectHooksResult,
+  CursorAgentsRespondApprovalInput,
+  CursorAgentsRespondApprovalResult,
+} from "./cursorAgents.ts";
 import * as Schema from "effect/Schema";
 import * as Rpc from "effect/rpc/Rpc";
 import * as RpcGroup from "effect/rpc/RpcGroup";
@@ -76,6 +95,7 @@ import {
   ClientActivityReportInput,
   HostPowerSnapshot,
 } from "./background.ts";
+import { UsagePolicyStatus } from "./usagePolicies.ts";
 import {
   FilesystemGetMetadataInput,
   FilesystemGetMetadataResult,
@@ -393,6 +413,16 @@ export const WS_METHODS = {
   filesystemGetMetadata: "filesystem.getMetadata",
   agentSessionsScan: "agentSessions.scan",
   agentSessionsImport: "agentSessions.import",
+  cursorAgentsList: "cursorAgents.list",
+  cursorAgentsLaunch: "cursorAgents.launch",
+  cursorAgentsFollowUp: "cursorAgents.followUp",
+  cursorAgentsStop: "cursorAgents.stop",
+  cursorAgentsFollow: "cursorAgents.follow",
+  cursorAgentsApprovals: "cursorAgents.approvals",
+  cursorAgentsRespondApproval: "cursorAgents.respondApproval",
+  cursorAgentsHookSetup: "cursorAgents.hookSetup",
+  cursorAgentsProjectHooks: "cursorAgents.projectHooks",
+  cursorAgentsMachine: "cursorAgents.machine",
   assetsCreateUrl: "assets.createUrl",
   assetsPersistChatAttachments: "assets.persistChatAttachments",
   attachmentsCreateUploadUrl: "attachments.createUploadUrl",
@@ -511,6 +541,7 @@ export const WS_METHODS = {
   serverReportClientActivity: "server.reportClientActivity",
   serverReportHostPowerState: "server.reportHostPowerState",
   serverGetBackgroundPolicy: "server.getBackgroundPolicy",
+  serverGetUsagePolicyStatus: "server.getUsagePolicyStatus",
   serverGetUsageSummary: "server.getUsageSummary",
   serverRefreshUsageRates: "server.refreshUsageRates",
 
@@ -586,6 +617,7 @@ export const WS_METHODS = {
   subscribeServerLifecycle: "subscribeServerLifecycle",
   subscribeAuthAccess: "subscribeAuthAccess",
   subscribeBackgroundPolicy: "subscribeBackgroundPolicy",
+  subscribeUsagePolicyStatus: "subscribeUsagePolicyStatus",
   subscribeResourceTelemetry: "subscribeResourceTelemetry",
 } as const;
 
@@ -960,6 +992,12 @@ const WsServerGetBackgroundPolicyRpc = Rpc.make(WS_METHODS.serverGetBackgroundPo
   error: EnvironmentAuthorizationError,
 });
 
+const WsServerGetUsagePolicyStatusRpc = Rpc.make(WS_METHODS.serverGetUsagePolicyStatus, {
+  payload: Schema.Struct({}),
+  success: UsagePolicyStatus,
+  error: EnvironmentAuthorizationError,
+});
+
 const PullRequestRpcError = Schema.Union([
   PullRequestUnavailableError,
   PullRequestOperationError,
@@ -1290,6 +1328,67 @@ const WsAgentSessionsScanRpc = Rpc.make(WS_METHODS.agentSessionsScan, {
   payload: AgentSessionScanInput,
   success: AgentSessionScanResult,
   error: Schema.Union([AgentSessionScanError, EnvironmentAuthorizationError]),
+});
+
+const WsCursorAgentsListRpc = Rpc.make(WS_METHODS.cursorAgentsList, {
+  payload: CursorAgentsListInput,
+  success: CursorAgentsListResult,
+  error: Schema.Union([CursorAgentsError, EnvironmentAuthorizationError]),
+});
+
+const WsCursorAgentsLaunchRpc = Rpc.make(WS_METHODS.cursorAgentsLaunch, {
+  payload: CursorAgentsLaunchInput,
+  success: CursorAgentsRunResult,
+  error: Schema.Union([CursorAgentsError, EnvironmentAuthorizationError]),
+});
+
+const WsCursorAgentsFollowUpRpc = Rpc.make(WS_METHODS.cursorAgentsFollowUp, {
+  payload: CursorAgentsFollowUpInput,
+  success: CursorAgentsRunResult,
+  error: Schema.Union([CursorAgentsError, EnvironmentAuthorizationError]),
+});
+
+const WsCursorAgentsStopRpc = Rpc.make(WS_METHODS.cursorAgentsStop, {
+  payload: CursorAgentTarget,
+  success: CursorAgentsRunResult,
+  error: Schema.Union([CursorAgentsError, EnvironmentAuthorizationError]),
+});
+
+const WsCursorAgentsFollowRpc = Rpc.make(WS_METHODS.cursorAgentsFollow, {
+  payload: CursorAgentTarget,
+  success: CursorAgentStreamEvent,
+  error: Schema.Union([CursorAgentsError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+
+const WsCursorAgentsApprovalsRpc = Rpc.make(WS_METHODS.cursorAgentsApprovals, {
+  payload: Schema.Struct({}),
+  success: CursorAgentsApprovalsResult,
+  error: Schema.Union([CursorAgentsError, EnvironmentAuthorizationError]),
+});
+
+const WsCursorAgentsRespondApprovalRpc = Rpc.make(WS_METHODS.cursorAgentsRespondApproval, {
+  payload: CursorAgentsRespondApprovalInput,
+  success: CursorAgentsRespondApprovalResult,
+  error: Schema.Union([CursorAgentsError, EnvironmentAuthorizationError]),
+});
+
+const WsCursorAgentsHookSetupRpc = Rpc.make(WS_METHODS.cursorAgentsHookSetup, {
+  payload: CursorAgentsHookSetupInput,
+  success: CursorAgentsHookSetup,
+  error: Schema.Union([CursorAgentsError, EnvironmentAuthorizationError]),
+});
+
+const WsCursorAgentsProjectHooksRpc = Rpc.make(WS_METHODS.cursorAgentsProjectHooks, {
+  payload: CursorAgentsProjectHooksInput,
+  success: CursorAgentsProjectHooksResult,
+  error: Schema.Union([CursorAgentsError, EnvironmentAuthorizationError]),
+});
+
+const WsCursorAgentsMachineRpc = Rpc.make(WS_METHODS.cursorAgentsMachine, {
+  payload: CursorMachineInput,
+  success: CursorMachineState,
+  error: Schema.Union([CursorAgentsError, EnvironmentAuthorizationError]),
 });
 
 const WsAgentSessionsImportRpc = Rpc.make(WS_METHODS.agentSessionsImport, {
@@ -1878,6 +1977,13 @@ const WsSubscribeBackgroundPolicyRpc = Rpc.make(WS_METHODS.subscribeBackgroundPo
   stream: true,
 });
 
+const WsSubscribeUsagePolicyStatusRpc = Rpc.make(WS_METHODS.subscribeUsagePolicyStatus, {
+  payload: Schema.Struct({}),
+  success: UsagePolicyStatus,
+  error: EnvironmentAuthorizationError,
+  stream: true,
+});
+
 const WsSubscribeResourceTelemetryRpc = Rpc.make(WS_METHODS.subscribeResourceTelemetry, {
   payload: Schema.Struct({}),
   success: ResourceTelemetrySnapshot,
@@ -1960,6 +2066,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerReportClientActivityRpc,
   WsServerReportHostPowerStateRpc,
   WsServerGetBackgroundPolicyRpc,
+  WsServerGetUsagePolicyStatusRpc,
   WsCloudGetRelayClientStatusRpc,
   WsCloudInstallRelayClientRpc,
   WsPullRequestsListRpc,
@@ -2013,6 +2120,16 @@ export const WsRpcGroup = RpcGroup.make(
   WsFilesystemBrowseRpc,
   WsFilesystemGetMetadataRpc,
   WsAgentSessionsScanRpc,
+  WsCursorAgentsListRpc,
+  WsCursorAgentsLaunchRpc,
+  WsCursorAgentsFollowUpRpc,
+  WsCursorAgentsStopRpc,
+  WsCursorAgentsApprovalsRpc,
+  WsCursorAgentsRespondApprovalRpc,
+  WsCursorAgentsHookSetupRpc,
+  WsCursorAgentsMachineRpc,
+  WsCursorAgentsProjectHooksRpc,
+  WsCursorAgentsFollowRpc,
   WsAgentSessionsImportRpc,
   WsAssetsCreateUrlRpc,
   WsAssetsPersistChatAttachmentsRpc,
@@ -2074,6 +2191,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsSubscribeServerLifecycleRpc,
   WsSubscribeAuthAccessRpc,
   WsSubscribeBackgroundPolicyRpc,
+  WsSubscribeUsagePolicyStatusRpc,
   WsSubscribeResourceTelemetryRpc,
   WsOrchestrationV2DispatchCommandRpc,
   WsOrchestrationV2GetWorkflowScriptRpc,

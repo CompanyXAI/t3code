@@ -108,6 +108,15 @@ vi.mock("../../hooks/useLocalStorage", () => ({ useLocalStorage: () => [false, v
 vi.mock("../../hooks/useCopyToClipboard", () => ({
   useCopyToClipboard: () => ({ copyToClipboard: vi.fn(), isCopied: false }),
 }));
+// Its settings layout imports lib/runtime, which builds real cloud layers at import time.
+vi.mock("../settings/ProviderAuthenticationSection", () => ({
+  ProviderAuthenticationSection: () => null,
+}));
+// The node test env has no window; Base UI tooltips in redacted labels need one.
+vi.mock("../settings/RedactedSensitiveText", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../settings/RedactedSensitiveText")>()),
+  RedactedSensitiveText: ({ value }: { value?: string | null }) => value ?? null,
+}));
 vi.mock("../../cloud/publicConfig", () => ({ hasCloudPublicConfig: () => false }));
 vi.mock("../clerk/useT3ConnectAuthPrompt", () => ({ useT3ConnectAuthPrompt: vi.fn() }));
 vi.mock("@clerk/react", () => ({ useAuth: vi.fn() }));

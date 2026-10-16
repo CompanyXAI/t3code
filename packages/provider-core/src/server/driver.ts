@@ -102,6 +102,13 @@ export interface ProviderInstance {
     ProviderConsumeResetCreditOutcome,
     ProviderDriverError
   >;
+  /**
+   * API key of the account behind this instance, for reading and launching
+   * agents outside a T3 thread (Cursor's agent directory). Only Cursor sets it.
+   */
+  readonly agentDirectoryApiKey?: Effect.Effect<string, ProviderDriverError>;
+  /** Cursor home of this instance (`homePath`; empty is the standard login). Only Cursor sets it. */
+  readonly homePath?: string;
   readonly orchestrationAdapter: ProviderAdapter.ProviderAdapterV2["Service"];
   readonly textGeneration: ProviderTextGeneration;
   readonly auth?: ProviderAuthController;

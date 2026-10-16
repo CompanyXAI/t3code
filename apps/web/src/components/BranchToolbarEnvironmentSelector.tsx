@@ -7,6 +7,7 @@ import { memo, useMemo } from "react";
 
 import type { EnvironmentOption } from "./BranchToolbar.logic";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
+import { MACHINE_NAME_REDACT_PROPS, RedactedSensitiveText } from "./settings/RedactedSensitiveText";
 import { useComposerMenuProps } from "./chat/composerEventScope";
 import {
   Select,
@@ -24,6 +25,7 @@ interface BranchToolbarEnvironmentSelectorProps {
   environmentId: EnvironmentId;
   availableEnvironments: readonly EnvironmentOption[];
   onEnvironmentChange?: (environmentId: EnvironmentId) => void;
+  machineHint?: string | undefined;
 }
 
 export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvironmentSelector({
@@ -33,6 +35,7 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
   environmentId,
   availableEnvironments,
   onEnvironmentChange,
+  machineHint,
 }: BranchToolbarEnvironmentSelectorProps) {
   const composerFloatingLayerProps = useComposerMenuProps();
   const activeEnvironment = useMemo(() => {
@@ -67,13 +70,34 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
           kind={activeEnvironment?.machine ?? "server"}
           className="size-3 shrink-0"
         />
-        <ComposerContextLabel>{activeEnvironment?.label ?? "Run on"}</ComposerContextLabel>
+        <ComposerContextLabel>
+          {activeEnvironment?.label ? (
+            <RedactedSensitiveText
+              value={activeEnvironment.label}
+              {...MACHINE_NAME_REDACT_PROPS}
+              className="text-xs font-normal text-muted-foreground/70"
+            />
+          ) : (
+            "Run on"
+          )}
+        </ComposerContextLabel>
       </span>
     );
     return (
       <Tooltip>
         <TooltipTrigger render={lockedRow} />
-        <TooltipPopup>{activeEnvironment?.label ?? "Run on"}</TooltipPopup>
+        <TooltipPopup>
+          {activeEnvironment?.label ? (
+            <RedactedSensitiveText
+              value={activeEnvironment.label}
+              {...MACHINE_NAME_REDACT_PROPS}
+              className="text-xs font-normal text-inherit"
+            />
+          ) : (
+            "Run on"
+          )}
+          {machineHint ? <div className="text-muted-foreground">{machineHint}</div> : null}
+        </TooltipPopup>
       </Tooltip>
     );
   }
@@ -108,10 +132,33 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
             />
           )}
           <ComposerContextLabel>
-            <SelectValue />
+            {autoEnvironmentLabel ? (
+              <SelectValue />
+            ) : activeEnvironment?.label ? (
+              <RedactedSensitiveText
+                value={activeEnvironment.label}
+                {...MACHINE_NAME_REDACT_PROPS}
+                className="text-xs font-normal"
+              />
+            ) : (
+              <SelectValue />
+            )}
           </ComposerContextLabel>
         </TooltipTrigger>
-        <TooltipPopup>{autoEnvironmentLabel ?? activeEnvironment?.label ?? "Run on"}</TooltipPopup>
+        <TooltipPopup>
+          {autoEnvironmentLabel ? (
+            autoEnvironmentLabel
+          ) : activeEnvironment?.label ? (
+            <RedactedSensitiveText
+              value={activeEnvironment.label}
+              {...MACHINE_NAME_REDACT_PROPS}
+              className="text-xs font-normal text-inherit"
+            />
+          ) : (
+            "Run on"
+          )}
+          {machineHint ? <div className="text-muted-foreground">{machineHint}</div> : null}
+        </TooltipPopup>
       </Tooltip>
       <SelectPopup alignItemWithTrigger={false} {...composerFloatingLayerProps}>
         <SelectGroup>
@@ -133,7 +180,11 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
             <SelectItem key={env.environmentId} value={env.environmentId}>
               <span className="inline-flex items-center gap-1.5">
                 <EnvironmentMachineIcon kind={env.machine} className="size-3" />
-                {env.label}
+                <RedactedSensitiveText
+                  value={env.label}
+                  {...MACHINE_NAME_REDACT_PROPS}
+                  className="text-sm font-normal"
+                />
               </span>
             </SelectItem>
           ))}

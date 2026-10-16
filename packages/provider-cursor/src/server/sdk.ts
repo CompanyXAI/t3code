@@ -10,6 +10,8 @@ export const {
   createAgentPlatform,
   Cursor,
   CursorSdkError,
+  FileCredentialStore,
+  getDefaultSdkAuthPath,
   InMemoryCredentialStore,
 } = requireCursorSdk("@cursor/sdk") as typeof import("@cursor/sdk");
 export const { SqliteLocalAgentStore } = requireCursorSdk(

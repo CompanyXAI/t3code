@@ -10,6 +10,7 @@ import {
   formatReadToolLabel,
   formatSearchToolLabel,
   mergeToolActivityData,
+  isToolPathArgKey,
 } from "./toolActivity.ts";
 
 describe("toolActivity", () => {
@@ -112,6 +113,14 @@ describe("toolActivity", () => {
     expect(collectToolFilePaths({ input: { file_path: "README" } })).toEqual(["README"]);
   });
 
+  it("recognizes path-like tool arg keys for Paths blur", () => {
+    expect(isToolPathArgKey("targetFile")).toBe(true);
+    expect(isToolPathArgKey("effectiveUri")).toBe(true);
+    expect(isToolPathArgKey("file_path")).toBe(true);
+    expect(isToolPathArgKey("pattern")).toBe(false);
+    expect(isToolPathArgKey("code")).toBe(false);
+  });
+
   it("keeps the first non-empty rawInput when a later update is empty", () => {
     expect(
       mergeToolActivityData({ rawInput: { path: "src/a.ts" } }, { rawInput: {}, kind: "read" }),
@@ -170,5 +179,19 @@ describe("toolActivity", () => {
     });
     expect(dynamicToolTitle("Skill", { skill: " " })).toBeUndefined();
     expect(dynamicToolTitle("Read", { skill: "full-send" })).toBeUndefined();
+  });
+});
+
+describe("collectToolFilePaths regression", () => {
+  it("does not treat shell cwd or search directories as touched files", () => {
+    expect(collectToolFilePaths({ input: { command: "ls", cwd: "/repo" } })).toEqual([]);
+    expect(collectToolFilePaths({ input: { query: "x", directory: "/repo/src" } })).toEqual([]);
+    expect(collectToolFilePaths({ input: { targetFile: "/repo/a.ts" } })).toEqual([]);
+    expect(collectToolFilePaths({ input: { file_path: "/repo/a.ts" } })).toEqual(["/repo/a.ts"]);
+  });
+  it("still blurs every path-like arg key", () => {
+    for (const key of ["cwd", "directory", "targetFile", "effectiveUri", "file_path"]) {
+      expect(isToolPathArgKey(key)).toBe(true);
+    }
   });
 });

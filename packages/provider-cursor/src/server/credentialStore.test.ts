@@ -103,3 +103,19 @@ it.effect(
       );
     }).pipe(Effect.provide(layerHost)),
 );
+
+it.effect("imports a shared SDK auth file without deleting it", () =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const sharedFile = path.join(yield* fileSystem.makeTempDirectoryScoped(), "sdk-auth.json");
+    yield* fileSystem.writeFileString(sharedFile, legacyFileText);
+    const instanceId = ProviderInstanceId.make("standard");
+    const imported = yield* makeCursorCredentialStore(instanceId, undefined, sharedFile);
+    assert.strictEqual(
+      (yield* Effect.tryPromise(() => imported.store.load()))?.apiKey,
+      "test-only-legacy-key",
+    );
+    assert.isTrue(yield* fileSystem.exists(sharedFile));
+  }).pipe(Effect.scoped, Effect.provide(layerHost)),
+);

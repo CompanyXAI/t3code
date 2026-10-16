@@ -44,6 +44,8 @@ interface ComposerPrimaryActionsProps {
   isPreparingWorktree: boolean;
   hasSendableContent: boolean;
   canResume?: boolean;
+  /** Imported thread whose native session cannot be resumed; shows a disabled resume control. */
+  nativeResumeUnavailableReason?: string | null;
   preserveComposerFocusOnPointerDown?: boolean;
   isEditingQueuedMessage?: boolean;
   onSubmitMessage?: MouseEventHandler<HTMLButtonElement>;
@@ -102,6 +104,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   isPreparingWorktree,
   hasSendableContent,
   canResume = false,
+  nativeResumeUnavailableReason = null,
   preserveComposerFocusOnPointerDown = false,
   isEditingQueuedMessage = false,
   onSubmitMessage,
@@ -360,7 +363,34 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
       <TooltipPopup>{submitTooltip}</TooltipPopup>
     </Tooltip>
   );
-  if (compactTokens === null) return submit;
+  // Imported Cursor IDE threads: shown whether or not there is history to compact
+  // (imports usually have no token usage yet, so compactTokens is null).
+  const resumeUnavailable = nativeResumeUnavailableReason ? (
+    <Tooltip key="native-resume-unavailable">
+      <TooltipTrigger render={<span className="inline-flex" />}>
+        <Button
+          size="icon-xs"
+          variant="ghost"
+          disabled
+          aria-label="Resume unavailable"
+          aria-description={nativeResumeUnavailableReason}
+        >
+          <PlayIcon className="size-3.5" aria-hidden="true" />
+        </Button>
+      </TooltipTrigger>
+      <TooltipPopup>{nativeResumeUnavailableReason}</TooltipPopup>
+    </Tooltip>
+  ) : null;
+  if (compactTokens === null) {
+    return resumeUnavailable === null ? (
+      submit
+    ) : (
+      <div className="flex items-center gap-1.5">
+        {resumeUnavailable}
+        {submit}
+      </div>
+    );
+  }
 
   return (
     <div data-chat-composer-compact-send="true" className="flex items-center gap-2">
@@ -393,6 +423,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
             : `Next send compacts ${compactTokens} tokens first. Click to keep full history`}
         </TooltipPopup>
       </Tooltip>
+      {resumeUnavailable}
       {submit}
     </div>
   );

@@ -59,6 +59,10 @@ import {
   WebStormIcon,
 } from "../JetBrainsIcons";
 import { cn, isMacPlatform, isWindowsPlatform } from "~/lib/utils";
+import {
+  MACHINE_NAME_REDACT_PROPS,
+  RedactedSensitiveText,
+} from "../settings/RedactedSensitiveText";
 import { shellEnvironment } from "~/state/shell";
 import { useAtomCommand } from "~/state/use-atom-command";
 import {
@@ -326,7 +330,12 @@ export const OpenInPicker = memo(function OpenInPicker({
     <>
       {remote.mode === "remote-unavailable" ? (
         <MenuItem density={presentation === "menu" ? "touch" : "default"} disabled>
-          No SSH route to {environmentLabel}
+          No SSH route to{" "}
+          <RedactedSensitiveText
+            value={environmentLabel}
+            {...MACHINE_NAME_REDACT_PROPS}
+            className="inline text-inherit"
+          />
         </MenuItem>
       ) : (
         <>
@@ -357,7 +366,12 @@ export const OpenInPicker = memo(function OpenInPicker({
           ))}
           {remote.mode === "remote-links" && !remoteHintSeen && (
             <MenuItem density={presentation === "menu" ? "touch" : "default"} disabled>
-              Opens over SSH. Needs your key on {environmentLabel}
+              Opens over SSH. Needs your key on{" "}
+              <RedactedSensitiveText
+                value={environmentLabel}
+                {...MACHINE_NAME_REDACT_PROPS}
+                className="inline text-inherit"
+              />
             </MenuItem>
           )}
         </>

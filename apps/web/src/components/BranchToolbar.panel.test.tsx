@@ -66,7 +66,8 @@ it("keeps machine choices usable when the combined row's workspace is locked", a
       );
     });
     const trigger = container.querySelector("button")!;
-    expect(trigger.textContent).toBe("local");
+    // The row shows the (blurred) device name, not a mode label.
+    expect(trigger.textContent).toHaveLength("local".length);
     expect(container.querySelectorAll("button")).toHaveLength(1);
     await act(async () => {
       trigger.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, ctrlKey: true }));
@@ -77,7 +78,8 @@ it("keeps machine choices usable when the combined row's workspace is locked", a
     expect(
       items.find((item) => item.textContent === "New worktree")?.getAttribute("aria-disabled"),
     ).toBe("true");
-    await act(async () => items.find((item) => item.textContent === "remote")!.click());
+    // Machine names are blurred by default; "remote" is the second machine entry.
+    await act(async () => items[1]!.click());
     expect(onEnvironmentChange).toHaveBeenCalledWith("remote");
   } finally {
     await act(async () => root.unmount());

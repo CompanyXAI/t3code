@@ -8,8 +8,10 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   getOnboardingProviderState,
+  isMultiInstanceOnboardingDriver,
   resolveOnboardingProviderInstallCommand,
   resolveOnboardingProviderLoginCommand,
+  selectOnboardingCursorInstances,
   selectOnboardingProvidersByDriver,
 } from "./providerReadiness.logic";
 
@@ -27,6 +29,80 @@ const readyCodex: ServerProvider = {
   skills: [],
 };
 
+describe("selectOnboardingCursorInstances", () => {
+  const disabledDefault: ServerProvider = {
+    instanceId: ProviderInstanceId.make("cursor"),
+    driver: ProviderDriverKind.make("cursor"),
+    enabled: false,
+    installed: false,
+    version: null,
+    status: "disabled",
+    auth: { status: "unknown" },
+    checkedAt: "2026-08-23T00:00:00.000Z",
+    models: [],
+    slashCommands: [],
+    skills: [],
+    displayName: "Cursor",
+  };
+  const account1: ServerProvider = {
+    ...disabledDefault,
+    instanceId: ProviderInstanceId.make("cursor_account_1"),
+    enabled: true,
+    installed: true,
+    status: "ready",
+    auth: { status: "authenticated" },
+    displayName: "Account 1",
+  };
+  const account3: ServerProvider = {
+    ...account1,
+    instanceId: ProviderInstanceId.make("cursor_account_3"),
+    displayName: "Account 3",
+  };
+
+  it("omits the unconfigured default Cursor probe when accounts exist in settings", () => {
+    const rows = selectOnboardingCursorInstances([disabledDefault, account1, account3], {
+      providerInstances: {
+        [account1.instanceId]: { driver: ProviderDriverKind.make("cursor"), enabled: true },
+        [account3.instanceId]: { driver: ProviderDriverKind.make("cursor"), enabled: true },
+      },
+    });
+    expect(rows.map((row) => String(row.instanceId))).toEqual([
+      "cursor_account_1",
+      "cursor_account_3",
+    ]);
+    expect(rows.map((row) => row.provider?.displayName)).toEqual(["Account 1", "Account 3"]);
+  });
+
+  it("still lists a settings account when the remote providers probe has not returned it yet", () => {
+    const rows = selectOnboardingCursorInstances([disabledDefault], {
+      providerInstances: {
+        [account3.instanceId]: {
+          driver: ProviderDriverKind.make("cursor"),
+          enabled: true,
+          displayName: "Account 3",
+        },
+      },
+    });
+    expect(rows).toHaveLength(1);
+    expect(String(rows[0]?.instanceId)).toBe("cursor_account_3");
+    expect(rows[0]?.provider).toBeUndefined();
+  });
+
+  it("falls back to one Set up placeholder when no Cursor instance is configured", () => {
+    const rows = selectOnboardingCursorInstances([disabledDefault], { providerInstances: {} });
+    expect(rows).toHaveLength(1);
+    expect(String(rows[0]?.instanceId)).toBe("cursor");
+    expect(rows[0]?.provider).toBe(disabledDefault);
+  });
+});
+
+describe("isMultiInstanceOnboardingDriver", () => {
+  it("lists every Codex account in the Agents step", () => {
+    expect(isMultiInstanceOnboardingDriver("codex")).toBe(true);
+    expect(isMultiInstanceOnboardingDriver("cursor")).toBe(false);
+    expect(isMultiInstanceOnboardingDriver("claudeAgent")).toBe(false);
+  });
+});
 describe("getOnboardingProviderState", () => {
   it("treats an enabled Codex provider with ready status and unknown authentication as ready", () => {
     expect(getOnboardingProviderState(readyCodex)).toBe("ready");

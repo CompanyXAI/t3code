@@ -1,5 +1,10 @@
 # T3 Code
 
+> **Fork notice:** This is a public fork of [pingdotgg/t3code](https://github.com/pingdotgg/t3code) maintained by CompanyXAI.
+> It adds deeper Cursor provider integration (IDE chat import, agents UI, blur/privacy controls, usage-policy hooks, and related tooling).
+> Upstream project: [T3 Code](https://t3.codes) / [pingdotgg/t3code](https://github.com/pingdotgg/t3code).
+> Based on upstream `main` at `d2d59fa7fe429012b07c46604a2e59788d06ffeb`. License: MIT (see `LICENSE`).
+
 T3 Code is an "agent harness control surface". It enables control of the agents on your machine with a best-in-class mobile app ([iOS](https://apps.apple.com/us/app/t3-code-remote-claude-more/id6787819824), [Android](https://play.google.com/store/apps/details?id=com.t3tools.t3code)), [web app](https://app.t3.codes) and [Electron-based desktop app](https://t3.codes).
 
 Works with your subscriptions on Claude Code, Codex, Cursor, Grok Build, OpenCode, and Google Antigravity. If they're set up on your computer, T3 Code can control them.

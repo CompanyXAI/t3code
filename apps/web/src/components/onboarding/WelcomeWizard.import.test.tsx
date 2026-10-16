@@ -11,6 +11,7 @@ import {
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 import { act, create, type ReactTestInstance, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
+import { redactedPlaceholder } from "../settings/RedactedSensitiveText";
 
 type SessionResult = AsyncResult.AsyncResult<AuthSessionState, Error>;
 type Project = { id: ProjectId; environmentId: EnvironmentId; workspaceRoot: string };
@@ -52,6 +53,10 @@ vi.mock("../../hooks/useTheme", () => ({ mountOnboardingTheme: () => () => {} })
 vi.mock("../../hooks/useLocalStorage", () => ({ useLocalStorage: () => [false, () => {}] }));
 vi.mock("../../hooks/useCopyToClipboard", () => ({
   useCopyToClipboard: () => ({ copyToClipboard: vi.fn(), copied: false }),
+}));
+// Its settings layout imports lib/runtime, which builds real cloud layers at import time.
+vi.mock("../settings/ProviderAuthenticationSection", () => ({
+  ProviderAuthenticationSection: () => null,
 }));
 vi.mock("../../cloud/publicConfig", () => ({ hasCloudPublicConfig: () => false }));
 vi.mock("../clerk/useT3ConnectAuthPrompt", () => ({ useT3ConnectAuthPrompt: vi.fn() }));
@@ -274,7 +279,9 @@ it("keeps scanning, choosing and skipping available to a paired read-only enviro
   setGrant(remoteId, false);
   await mountImport(true);
   expect(state.scan).toHaveBeenCalledWith(expect.objectContaining({ environmentId: remoteId }));
-  expect(text(renderer!.root)).toContain("/projects/first");
+  // Project paths are blurred (path category) until revealed.
+  expect(text(renderer!.root)).toContain(redactedPlaceholder("/projects/first"));
+  expect(text(renderer!.root)).not.toContain("/projects/first");
   expect(button("Import 2 projects").props.disabled).toBe(true);
   expect(text(renderer!.root)).toContain(permissionMessage);
   await click("Do not import projects");

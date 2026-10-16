@@ -40,8 +40,10 @@ import {
 } from "../../keybindings";
 import {
   useEnvironmentModelPreferences,
+  usePrimarySettings,
   useToggleEnvironmentModelFavorite,
 } from "~/hooks/useSettings";
+import { modelBlockedByUsagePolicy } from "~/lib/usagePolicyGate";
 import { cn } from "~/lib/utils";
 import { getVirtualizedScrollFadeClassName } from "../ui/scroll-area";
 import { TooltipProvider } from "../ui/tooltip";
@@ -208,6 +210,9 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   const pickerContentRef = useRef<HTMLDivElement>(null);
   const highlightedModelKeyRef = useRef<string | null>(null);
   const { favorites } = useEnvironmentModelPreferences(props.environmentId);
+  const usagePolicySettings = usePrimarySettings((settings) => ({
+    usagePolicies: settings.usagePolicies,
+  }));
   const activeEntry = props.instanceEntries.find(
     (entry) => entry.instanceId === props.activeInstanceId,
   );
@@ -954,8 +959,19 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                     if (!model) {
                       return null;
                     }
+                    const entry = entryByInstanceId.get(model.instanceId);
+                    const authType = entry?.snapshot.auth.type;
+                    const policyReason = modelBlockedByUsagePolicy({
+                      settings: usagePolicySettings,
+                      instanceId: model.instanceId,
+                      driverKind: model.driverKind,
+                      model: model.slug,
+                      ...(authType !== undefined ? { authType } : {}),
+                    });
                     const disabledReason =
-                      getModelDisabledReason?.(model.instanceId, model.slug) ?? null;
+                      policyReason ??
+                      getModelDisabledReason?.(model.instanceId, model.slug) ??
+                      null;
                     return (
                       <ModelListRow
                         key={modelKey}

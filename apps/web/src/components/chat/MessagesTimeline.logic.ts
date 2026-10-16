@@ -150,7 +150,9 @@ export function workEntryDisplayLabel(entry: WorkLogEntry, workspaceRoot: string
   }
   const readPaths = action === "read" ? workEntryReadPaths(entry, workspaceRoot) : [];
   if (action === "read" && readPaths[0]) {
-    return formatReadToolLabel(readPaths[0], readPaths.length - 1);
+    const label = formatReadToolLabel(readPaths[0], readPaths.length - 1);
+    const range = readPaths.length === 1 ? workEntryReadLineRange(entry) : null;
+    return range === null ? label : `${label} · ${range}`;
   }
   // Retrying providers keep their progress label; other diagnostics expose
   // the retained message instead of a generic error heading. File bodies
@@ -179,6 +181,29 @@ export function workEntryDisplayLabel(entry: WorkLogEntry, workspaceRoot: string
   }
   const heading = normalizeCompactToolLabel(entry.toolTitle || entry.label);
   return `${heading.charAt(0).toUpperCase()}${heading.slice(1)}`;
+}
+
+/**
+ * Line range of a single-file read from its `offset`/`limit` input (Claude Read and
+ * imported Cursor reads use 1-based `offset` and a line-count `limit`), e.g. "L120–179".
+ */
+export function workEntryReadLineRange(
+  entry: Pick<WorkLogEntry, "structuredPayload" | "toolData">,
+): string | null {
+  const fromPayload =
+    entry.structuredPayload?.type === "dynamic_tool" ? entry.structuredPayload.input : undefined;
+  const toolInput = (entry.toolData as { input?: unknown } | undefined)?.input;
+  const input = [fromPayload, toolInput].find(
+    (value): value is Record<string, unknown> => value !== null && typeof value === "object",
+  );
+  if (input === undefined) return null;
+  const whole = (value: unknown) =>
+    typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
+  const offset = whole(input.offset);
+  const limit = whole(input.limit);
+  if (offset === null && limit === null) return null;
+  const start = offset ?? 1;
+  return limit === null ? `L${start}+` : `L${start}–${start + limit - 1}`;
 }
 
 /** The trimmed thread id a `t3_thread_read` call targets, or null for any other entry. */

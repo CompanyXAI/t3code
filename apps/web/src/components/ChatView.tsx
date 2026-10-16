@@ -39,6 +39,10 @@ import {
 } from "@t3tools/shared/usageLimits";
 import { feedbackBannerItem } from "./chat/ComposerFeedback";
 import { usageLimitsBannerItem } from "./chat/ComposerUsageLimits";
+import {
+  cursorHandoffWarning,
+  estimateHandoffContextTokens,
+} from "./chat/cursorHandoffWarning";
 import { getTerminalLabel } from "@t3tools/shared/terminalLabels";
 import * as Schema from "effect/Schema";
 import {
@@ -8485,11 +8489,26 @@ export default function ChatView(props: ChatViewProps) {
     });
   };
 
-  const onForkFromRun = async (input: {
+  const confirmCursorHandoff = async (action: "fork" | "switch" | "import"): Promise<boolean> => {
+    const message = cursorHandoffWarning(
+      action,
+      estimateHandoffContextTokens(
+        activeThreadLiveTokenUsage?.usedTokens,
+        serverProjection?.messages ?? [],
+      ),
+    );
+    const localApi = readLocalApi();
+    return localApi == null ? window.confirm(message) : await localApi.dialogs.confirm(message);
+  };
+    const onForkFromRun = async (input: {
     readonly sourceThreadId: ThreadId;
     readonly runId: RunId;
   }) => {
     if (!activeThread || activeEnvironmentUnavailable) return;
+    const forkDriver = providerStatuses.find(
+      (provider) => provider.instanceId === activeThread.modelSelection.instanceId,
+    )?.driver;
+    if (forkDriver === "cursor" && !(await confirmCursorHandoff("fork"))) return;
     const targetThreadId = newThreadId();
     const targetThreadRef = scopeThreadRef(environmentId, targetThreadId);
     const result = await forkThreadFromRun({
@@ -8661,7 +8680,46 @@ export default function ChatView(props: ChatViewProps) {
       notifyDirectAnnotationAttached();
       return;
     }
-    if (needsLoadBalancing) {
+    {
+      // The account the conversation last ran on; the thread's own selection
+      // already follows the picker.
+      const fromInstance =
+        (serverProjection?.providerThreads ?? []).reduce<{
+          readonly providerInstanceId: string;
+          readonly lastRunOrdinal: number | null;
+        } | null>(
+          (latest, thread) =>
+            latest === null || (thread.lastRunOrdinal ?? 0) >= (latest.lastRunOrdinal ?? 0)
+              ? thread
+              : latest,
+          null,
+        )?.providerInstanceId ?? null;
+      const toInstance =
+        composerRef.current?.getSendContext()?.selectedModelSelection?.instanceId ?? null;
+      const driverOf = (instanceId: string | null) =>
+        providerStatuses.find((provider) => provider.instanceId === instanceId)?.driver;
+      if (
+        fromInstance !== null &&
+        toInstance !== null &&
+        toInstance !== fromInstance &&
+        driverOf(fromInstance) === "cursor" &&
+        driverOf(toInstance) === "cursor" &&
+        !(await confirmCursorHandoff("switch"))
+      ) {
+        return;
+      }
+    }
+    // Cursor IDE imports have no resumable agent: the first send starts a new one
+    // with the imported history as context. Once it exists the thread has an
+    // active provider thread and this no longer asks.
+    if (
+      serverProjection?.thread.nativeResumeUnavailable === "cursor_ide_import" &&
+      serverProjection.thread.activeProviderThreadId == null &&
+      !(await confirmCursorHandoff("import"))
+    ) {
+      return;
+    }
+        if (needsLoadBalancing) {
       toastManager.add({
         type: "warning",
         title: loadBalancing.pending

@@ -20,6 +20,7 @@ import { Button } from "~/components/ui/button";
 import { MorphIcon } from "~/components/MorphIcon";
 import { Spinner } from "~/components/ui/spinner";
 import { MiddleTruncate } from "../ui/middle-truncate";
+import { BranchName } from "../settings/BranchName";
 import { observeVisibleAnimation } from "~/lib/visibleAnimation";
 import { cn } from "~/lib/utils";
 import { WorkLogRow } from "./WorkLog";
@@ -261,7 +262,7 @@ function SetupDetails({ snapshot }: { snapshot: WorktreeSetupSnapshot }) {
         <>
           <dt className="text-foreground/80">Branch</dt>
           <dd className="min-w-0 font-mono">
-            <MiddleTruncate value={snapshot.branch} className="flex" />
+            <BranchName value={snapshot.branch} className="flex" />
           </dd>
         </>
       ) : null}

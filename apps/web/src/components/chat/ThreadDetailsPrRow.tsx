@@ -1,5 +1,6 @@
 import { ThreadDetailsControl } from "./ThreadDetailsControl";
 import { PullRequestGlyph } from "../pullRequest/pullRequestIcons";
+import { BranchName } from "../settings/BranchName";
 /**
  * The thread details panel's pull request row: what the thread's pull request is, and the one
  * thing worth doing to it right now.
@@ -263,7 +264,8 @@ export function ThreadDetailsPrRow({
             <div className="flex min-w-0 items-center gap-2">
               <GitBranchIcon className="size-3 shrink-0 stroke-muted-foreground" />
               <div className="min-w-0 truncate text-foreground/75">
-                {detail.baseBranch} ← {detail.headBranch}
+                <BranchName value={detail.baseBranch} showTitle={false} /> ←{" "}
+                <BranchName value={detail.headBranch} showTitle={false} />
               </div>
             </div>
             {detail.state === "open" && checksState !== "none" ? (

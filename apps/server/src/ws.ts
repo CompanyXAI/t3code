@@ -166,6 +166,9 @@ import * as OrchestrationEventStore from "./persistence/OrchestrationEventStore.
 import { userFacingDispatchErrorMessage } from "./orchestration-v2/UserFacingErrors.ts";
 import * as ProviderRegistry from "./provider/ProviderRegistry.ts";
 import * as ProviderInstanceRegistry from "./provider/ProviderInstanceRegistry.ts";
+import * as CursorAgents from "./cursorAgents/CursorAgents.ts";
+import * as CursorWorkerHooks from "./cursorAgents/CursorWorkerHooks.ts";
+import * as CursorAgentDirectory from "@t3tools/provider-cursor/server/CursorAgentDirectory";
 import * as AcpRegistrySupport from "@t3tools/provider-acp-registry/server/AcpRegistrySupport";
 import * as AcpRegistryRuntimeCoordinator from "@t3tools/provider-acp-registry/server/AcpRegistryRuntimeCoordinator";
 import * as ModelManifest from "./provider/ModelManifest.ts";
@@ -254,6 +257,7 @@ import {
 import * as AgentSessionScanner from "./project/AgentSessionScanner.ts";
 import * as AgentSessionImporter from "./project/AgentSessionImporter.ts";
 import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
+import * as UsagePolicyService from "./usage/UsagePolicyService.ts";
 
 const CONFIG_DISCOVERY_TIMEOUT = Duration.seconds(5);
 const isProviderUploadFeedbackError = Schema.is(ProviderUploadFeedbackError);
@@ -1268,6 +1272,7 @@ const layerWsRpc = (
             );
       const usage = yield* UsageService.UsageService;
       const usageLimitSources = yield* UsageLimitSources.UsageLimitSources;
+      const usagePolicyService = yield* UsagePolicyService.UsagePolicyService;
       const projectSetupScriptRunner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
       const worktreeSetupTracker = yield* WorktreeSetupTracker.WorktreeSetupTracker;
       const projectCloneTracker = yield* ProjectCloneTracker.ProjectCloneTracker;
@@ -1292,6 +1297,15 @@ const layerWsRpc = (
       const modelManifest = yield* ModelManifest.ModelManifest;
       const providerLatestVersions = yield* ProviderLatestVersions.ProviderLatestVersions;
       const providerInstances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
+      const cursorAgents = CursorAgents.make({
+        listInstances: providerInstances.listInstances,
+        directory: yield* CursorAgentDirectory.makeLive,
+        stateDir: (yield* ServerConfig.ServerConfig).stateDir,
+      });
+      const cursorWorkerHooks = CursorWorkerHooks.make({
+        stateDir: (yield* ServerConfig.ServerConfig).stateDir,
+      });
+      yield* cursorWorkerHooks.resumeIfConfigured;
       const acpRegistryCatalog = yield* AcpRegistrySupport.AcpRegistryCatalog;
       const acpRegistryRuntimeCoordinator =
         yield* AcpRegistryRuntimeCoordinator.AcpRegistryRuntimeCoordinator;
@@ -2474,6 +2488,7 @@ const layerWsRpc = (
         [WS_METHODS.serverReportHostPowerState]: (input) =>
           backgroundPolicy.reportHostPowerState(input),
         [WS_METHODS.serverGetBackgroundPolicy]: (_input) => backgroundPolicy.snapshot,
+        [WS_METHODS.serverGetUsagePolicyStatus]: (_input) => usagePolicyService.status,
         [WS_METHODS.cloudGetRelayClientStatus]: (_input) => relayClient.resolve,
         [WS_METHODS.cloudInstallRelayClient]: (_input) =>
           Stream.callback<RelayClientInstallProgressEvent, RelayClientInstallFailedError>((queue) =>
@@ -2740,6 +2755,17 @@ const layerWsRpc = (
         [WS_METHODS.attachmentsCreateUploadUrl]: (input) => issueAttachmentUploadUrl(input),
         [WS_METHODS.attachmentsDelete]: (input) => deletePendingAttachment(input.attachmentId),
         [WS_METHODS.agentSessionsScan]: () => agentSessionScanner.scan,
+        [WS_METHODS.cursorAgentsList]: (input) => cursorAgents.list(input),
+        [WS_METHODS.cursorAgentsLaunch]: (input) => cursorAgents.launch(input),
+        [WS_METHODS.cursorAgentsFollowUp]: (input) => cursorAgents.followUp(input),
+        [WS_METHODS.cursorAgentsStop]: (input) => cursorAgents.stop(input),
+        [WS_METHODS.cursorAgentsFollow]: (input) => cursorAgents.follow(input),
+        [WS_METHODS.cursorAgentsApprovals]: () => cursorWorkerHooks.listApprovals,
+        [WS_METHODS.cursorAgentsRespondApproval]: (input) =>
+          cursorWorkerHooks.respondApproval(input),
+        [WS_METHODS.cursorAgentsHookSetup]: (input) => cursorWorkerHooks.hookSetup(input),
+        [WS_METHODS.cursorAgentsProjectHooks]: (input) => cursorWorkerHooks.projectHooks(input),
+        [WS_METHODS.cursorAgentsMachine]: (input) => cursorAgents.machine(input),
         [WS_METHODS.agentSessionsImport]: (input) =>
           agentSessionImporter.importRecentAgentThreads(input),
         [WS_METHODS.assetsCreateUrl]: (input) =>
@@ -3150,6 +3176,12 @@ const layerWsRpc = (
         [WS_METHODS.subscribeBackgroundPolicy]: (_input) =>
           Stream.unwrap(
             Effect.map(backgroundPolicy.subscribe, ({ latest, changes }) =>
+              Stream.concat(Stream.make(latest), changes),
+            ),
+          ),
+        [WS_METHODS.subscribeUsagePolicyStatus]: (_input) =>
+          Stream.unwrap(
+            Effect.map(usagePolicyService.subscribe, ({ latest, changes }) =>
               Stream.concat(Stream.make(latest), changes),
             ),
           ),

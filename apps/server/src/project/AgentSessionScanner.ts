@@ -1,9 +1,10 @@
 /**
  * AgentSessionScanner - discovery of projects a user already works on.
  *
- * Claude Code and Codex both keep a per-session transcript on disk, and each
- * transcript records the directory the session ran in. Reading those `cwd`
- * values gives us the set of directories worth offering as projects during
+ * Claude Code, Codex, and Cursor each keep per-session transcripts on disk.
+ * Claude/Codex record the working directory inside each transcript; Cursor
+ * records it in `~/.cursor/chats/<hash>/<agentId>/meta.json`. Reading
+ * those locations gives us directories worth offering as projects during
  * onboarding, without asking the user to browse the filesystem.
  *
  * The scan is read-only and best-effort: an unreadable home, a malformed
@@ -24,6 +25,7 @@ import {
   resolveProviderInstanceEnabled,
   type AgentSessionImportSource,
   type AgentSessionProjectCandidate,
+  type AgentSessionOrphan,
   type AgentSessionProjectGit,
   type AgentSessionScanResult,
   type ProviderInstanceConfig,
@@ -57,6 +59,27 @@ import {
   createTranscriptJsonSelector,
   TranscriptJsonLimitError,
 } from "./AgentSessionJson.ts";
+import {
+  buildCursorSlugIndex,
+  cursorIdeGlobalStateDb,
+  cursorIdeWorkspaceStorageDir,
+  parseCursorWorkspaceFolder,
+  readCursorChatCwdIndex,
+} from "./CursorAgentSessionPaths.ts";
+import { readCursorIdeComposer } from "./CursorIdeStateDb.ts";
+import {
+  cursorIdeComposerLabels,
+  cursorIdeRootComposer,
+  cursorIdeComposerPath,
+  loadCursorIdeIndex,
+  parseCursorIdeComposerPath,
+} from "./CursorIdeIndex.ts";
+import {
+  decodeCursorChatStore,
+  isT3CursorSdkAgent,
+  readCursorSdkAgent,
+  type CursorStoreDbMessage,
+} from "./CursorStoreDb.ts";
 
 /** Chunk size for full transcript reads. */
 const TRANSCRIPT_PREFIX_BYTES = 32 * 1024;
@@ -70,16 +93,17 @@ const MAX_TRANSCRIPT_SCAN_BYTES = 1024 * 1024;
  * Newest-first ordering means the cap drops only stale sessions when a home
  * directory is unusually large.
  */
-const MAX_TRANSCRIPTS_PER_SOURCE = 5000;
+const MAX_TRANSCRIPTS_PER_SOURCE = 20_000;
 
 /**
  * Upper bound on discovery filesystem operations per source. Newest-first
  * ordering needs mtimes before the read cap can be applied, so directory reads
  * and candidate stats share a larger budget. Once it runs out the scan stops.
  */
-const MAX_DISCOVERY_OPERATIONS_PER_SOURCE = MAX_TRANSCRIPTS_PER_SOURCE * 4;
+// Work budgets stay fixed; they bound filesystem work, not how many chats are listed.
+const MAX_DISCOVERY_OPERATIONS_PER_SOURCE = 20_000;
 const MAX_METADATA_BYTES_PER_SOURCE = 64 * 1024 * 1024;
-const MAX_METADATA_OPERATIONS_PER_SOURCE = MAX_TRANSCRIPTS_PER_SOURCE * 4;
+const MAX_METADATA_OPERATIONS_PER_SOURCE = 20_000;
 const MAX_METADATA_RECORDS_PER_SOURCE = 100_000;
 const MAX_METADATA_RECORDS_PER_TRANSCRIPT = 1_000;
 const RECENT_THREAD_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
@@ -112,6 +136,8 @@ const CodexTurnMetadata = Schema.Struct({
 
 const TranscriptRecord = Schema.Struct({
   type: Schema.optional(Schema.String),
+  /** Cursor agent-transcripts put role at the top level. */
+  role: Schema.optional(Schema.String),
   timestamp: Schema.optional(Schema.String),
   cwd: Schema.optional(Schema.String),
   sessionId: Schema.optional(Schema.String),
@@ -155,6 +181,23 @@ export interface AgentSessionThreadMessage {
   readonly role: "user" | "assistant";
   readonly text: string;
   readonly createdAt: string;
+  /** Cursor store.db thinking step (rendered as a reasoning turn item). */
+  readonly reasoning?: boolean;
+  /** Cursor store.db tool call or shell turn (rendered as a turn item, not a message). */
+  readonly tool?:
+    | {
+        readonly kind: "command";
+        readonly command: string;
+        readonly output: string | null;
+        readonly exitCode: number | null;
+      }
+    | {
+        readonly kind: "dynamic";
+        readonly name: string;
+        readonly toolCallId: string | null;
+        readonly input: unknown;
+        readonly output: unknown;
+      };
 }
 
 export interface AgentSessionThread {
@@ -166,6 +209,20 @@ export interface AgentSessionThread {
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly messages: ReadonlyArray<AgentSessionThreadMessage>;
+  /**
+   * Cursor only: id that `Agent.resume` accepts (local SDK `agent-*` id). Absent for
+   * chats / transcript ids, which were proven not resumable.
+   */
+  readonly cursorResumeAgentId?: string;
+  /** Cursor IDE composer state: archived/draft flags and the parent of a subagent. */
+  readonly cursorIde?: {
+    readonly archived: boolean;
+    readonly draft: boolean;
+    readonly parentSessionId: string | null;
+    /** Top of the subagent chain (the parent's parent, …); null when not a subagent. */
+    readonly rootSessionId: string | null;
+    readonly labels: ReadonlyArray<string>;
+  };
 }
 
 export type AgentSessionRecentThread =
@@ -183,10 +240,10 @@ export class AgentSessionScanner extends Context.Service<
   AgentSessionScanner,
   {
     /**
-     * Discover every directory the configured Claude and Codex homes have run
-     * a session in. Candidates are returned newest-first; the client decides
+     * Discover every directory the configured Claude, Codex, and Cursor homes
+     * have run a session in. Candidates are returned newest-first; the client decides
      * which ones to import and how far back to look. Fails with the contract
-     * error directly — there is no server-local context worth wrapping.
+     * error directly â€” there is no server-local context worth wrapping.
      */
     readonly scan: Effect.Effect<AgentSessionScanResult, AgentSessionScanError>;
     readonly recentThreads: (
@@ -197,8 +254,21 @@ export class AgentSessionScanner extends Context.Service<
 >()("t3/project/AgentSessionScanner") {}
 
 type AgentSessionSource = AgentSessionProjectCandidate["sources"][number];
+type AgentSessionCandidateThread = NonNullable<AgentSessionProjectCandidate["threads"]>[number];
+/** Bounds the scan payload; threadCount stays the full count. */
+const MAX_CANDIDATE_THREADS = 20_000;
 
 /** A single directory's worth of evidence from one source. */
+const orphanOf = (
+  source: AgentSessionSource,
+  providerSessionId: string,
+  mtimeMs: number,
+): AgentSessionOrphan => ({
+  source,
+  providerSessionId,
+  lastActiveAt: DateTime.formatIso(DateTime.makeUnsafe(mtimeMs)),
+});
+
 interface RawCandidate {
   readonly cwd: string;
   readonly source: AgentSessionSource;
@@ -209,6 +279,8 @@ interface RawCandidate {
     readonly filePath: string;
     readonly mtimeMs: number | null;
   }>;
+  /** One entry per session, for the per-project list in the import step. */
+  readonly threads?: ReadonlyArray<AgentSessionCandidateThread>;
 }
 
 interface TranscriptCandidate {
@@ -216,6 +288,15 @@ interface TranscriptCandidate {
   readonly mtimeMs: number;
   readonly providerInstanceId: ProviderInstanceId;
   readonly size: number;
+  /** Set when cwd is known without reading the file (Cursor chats meta.json). */
+  readonly cwd?: string;
+  /** Cursor: no recorded cwd; listed as an orphan without reading the file. */
+  readonly orphanSessionId?: string;
+  /** Cursor IDE transcript id with a proven cwd (dedupes copies across project folders). */
+  readonly sessionId?: string;
+  /** Cursor IDE composer title and import-list labels (archived, draft, subagent, ...). */
+  readonly title?: string;
+  readonly labels?: ReadonlyArray<string>;
 }
 
 interface MetadataReadBudget {
@@ -424,6 +505,21 @@ function parseAgentSessionRecords(
       continue;
     }
 
+    if (input.source === "cursor") {
+      if (record.role !== "user" && record.role !== "assistant") {
+        continue;
+      }
+      const text = extractText(record.message?.content);
+      if (text.length === 0) continue;
+      retainMessage({
+        role: record.role,
+        text,
+        createdAt: normalizeTimestamp(record.timestamp, fallbackTimestamp),
+        codexResponseUser: false,
+      });
+      continue;
+    }
+
     if (record.type === "session_meta") {
       const sessionId = record.payload?.id?.trim() || record.payload?.session_id?.trim();
       if (!hasCodexSessionId && sessionId) {
@@ -524,6 +620,9 @@ function shouldRetainDecodedRecord(
       record.aiTitle !== undefined ||
       record.message?.model !== undefined
     );
+  }
+  if (source === "cursor") {
+    return record.role === "user" || record.role === "assistant";
   }
   return (
     record.type === "session_meta" ||
@@ -629,7 +728,8 @@ export const make = Effect.gen(function* () {
   const worktreesDir = path.resolve(serverConfig.worktreesDir);
   // Windows filesystems are case-insensitive, so path prefix checks there
   // must case fold.
-  const foldWorktreeCase = (yield* HostProcess.Platform) === "win32";
+  const hostPlatform = yield* HostProcess.Platform;
+  const foldWorktreeCase = hostPlatform === "win32";
   const hostEnvironment = yield* HostProcess.Environment;
   const homeDir = yield* HostProcess.HomeDirectory;
   // `/private/tmp` is what macOS reports for sessions started in `/tmp`.
@@ -968,6 +1068,402 @@ export const make = Effect.gen(function* () {
     },
   );
 
+  // Cursor store.db (chats or local SDK agent) -> thread, messages in protobuf tree order.
+  const readCursorStoreThread = (
+    storePath: string,
+    cwd: string,
+    providerInstanceId: ProviderInstanceId,
+    lastActiveAtMs: number,
+  ) =>
+    Effect.tryPromise(async (): Promise<AgentSessionThread | null> => {
+      const agentDir = path.basename(path.dirname(storePath));
+      const isSdk = path.basename(path.dirname(path.dirname(storePath))) === "agents";
+      let providerSessionId: string;
+      let title: string | null;
+      let createdAtMs: number | null = null;
+      let resumeId: string | undefined;
+      let messages: ReadonlyArray<CursorStoreDbMessage>;
+      let ideMeta: {
+        readonly archived: boolean;
+        readonly parentComposerId: string | null;
+        readonly rootComposerId: string | null;
+        readonly draft: boolean;
+        readonly draftText: string | null;
+        readonly labels: ReadonlyArray<string>;
+      } | null = null;
+      const ideComposerPath = parseCursorIdeComposerPath(storePath);
+      if (isSdk) {
+        const [agent] = await readCursorSdkAgent(
+          path.dirname(path.dirname(path.dirname(storePath))),
+          agentDir,
+        );
+        if (agent === undefined || agent.cwd !== cwd) return null;
+        providerSessionId = agent.agentId;
+        resumeId = agent.agentId;
+        title = agent.name;
+        const parsed = Date.parse(agent.createdAt);
+        if (Number.isFinite(parsed)) createdAtMs = parsed;
+        messages = agent.messages;
+      } else if (storePath.endsWith(".jsonl") || ideComposerPath !== null) {
+        // IDE composer (agent transcript or IDE-DB-only chat): full history from the
+        // IDE's global state DB.
+        providerSessionId = ideComposerPath?.composerId ?? path.basename(storePath, ".jsonl");
+        const workspaceStorage = cursorIdeWorkspaceStorageDir(
+          path,
+          hostPlatform,
+          hostEnvironment,
+          homeDir,
+        );
+        const globalDb =
+          ideComposerPath?.globalDb ?? cursorIdeGlobalStateDb(path, workspaceStorage);
+        // The read is synchronous; yield first so a long import never starves the server.
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        const composer = readCursorIdeComposer(globalDb, providerSessionId);
+        if (composer === null) return null;
+        title = composer.title;
+        createdAtMs = composer.createdAtMs;
+        messages = composer.messages;
+        const index = await loadCursorIdeIndex(globalDb, workspaceStorage);
+        const entry = index?.composers.get(providerSessionId);
+        if (index !== null && entry !== undefined) {
+          ideMeta = {
+            archived: index.workspaceListState.get(providerSessionId)?.archived === true,
+            parentComposerId: index.parentOf.get(providerSessionId) ?? null,
+            rootComposerId: cursorIdeRootComposer(index, providerSessionId),
+            draft: entry.isDraft,
+            draftText: entry.draftText,
+            labels: cursorIdeComposerLabels(index, providerSessionId),
+          };
+        }
+      } else {
+        const chat = await decodeCursorChatStore(storePath);
+        providerSessionId = chat.agentId ?? agentDir;
+        title = chat.title;
+        messages = chat.messages;
+      }
+      if (ideMeta?.draft) {
+        // Drafts import in full: the unsent composer text is the last user message.
+        messages = [
+          ...messages,
+          { kind: "text", role: "user", text: ideMeta.draftText ?? "", atMs: null },
+        ] as ReadonlyArray<CursorStoreDbMessage>;
+      }
+      if (
+        ideMeta?.draft !== true &&
+        ideMeta?.parentComposerId == null &&
+        !messages.some((message) => message.kind === "text" && message.role === "user")
+      ) {
+        return null;
+      }
+      const iso = (ms: number | null) =>
+        DateTime.formatIso(DateTime.makeUnsafe(ms ?? lastActiveAtMs));
+      const threadMessages = messages.map((message): AgentSessionThreadMessage => {
+        const createdAt = iso(message.atMs);
+        switch (message.kind) {
+          case "text":
+            return { role: message.role, text: message.text, createdAt };
+          case "reasoning":
+            return { role: "assistant", text: message.text, createdAt, reasoning: true };
+          case "command":
+            return {
+              role: "assistant",
+              text: "",
+              createdAt,
+              tool: {
+                kind: "command",
+                command: message.command,
+                output: message.output,
+                exitCode: message.exitCode,
+              },
+            };
+          case "tool":
+            return {
+              role: "assistant",
+              text: "",
+              createdAt,
+              tool: {
+                kind: "dynamic",
+                name: message.toolName,
+                toolCallId: message.toolCallId,
+                input: message.input,
+                output: message.output,
+              },
+            };
+        }
+      });
+      const firstUser = threadMessages.find((message) => message.role === "user");
+      const fallbackTitle = (firstUser?.text ?? "Cursor chat").split("\n")[0]!.slice(0, 80);
+      return {
+        source: "cursor",
+        providerInstanceId,
+        providerSessionId,
+        title: title && title.trim().length > 0 ? title.trim() : fallbackTitle,
+        model: null,
+        createdAt: iso(
+          createdAtMs ?? (threadMessages[0] ? Date.parse(threadMessages[0].createdAt) : null),
+        ),
+        updatedAt: iso(null),
+        messages: threadMessages,
+        ...(resumeId !== undefined ? { cursorResumeAgentId: resumeId } : {}),
+        ...(ideMeta === null
+          ? {}
+          : {
+              cursorIde: {
+                archived: ideMeta.archived,
+                draft: ideMeta.draft,
+                parentSessionId: ideMeta.parentComposerId,
+                rootSessionId: ideMeta.rootComposerId,
+                labels: ideMeta.labels,
+              },
+            }),
+      } satisfies AgentSessionThread;
+    }).pipe(Effect.orElseSucceed(() => null));
+
+  const discoverCursorTranscripts = Effect.fn("AgentSessionScanner.discoverCursorTranscripts")(
+    function* (homePath: string, providerInstanceId: ProviderInstanceId, operationBudget: number) {
+      const projectsDir = path.join(homePath, "projects");
+      let operationsRemaining = operationBudget;
+      let truncated = false;
+      const readDirectory = (directory: string) => {
+        if (operationsRemaining <= 0) {
+          truncated = true;
+          return Effect.succeed<ReadonlyArray<string>>([]);
+        }
+        operationsRemaining -= 1;
+        return listDirectory(directory);
+      };
+      const projectDirectories = yield* readDirectory(projectsDir);
+      const transcripts: Array<TranscriptCandidate> = [];
+      // cwd comes only from ~/.cursor/chats/<md5(cwd)>/<agentId>/meta.json; the
+      // project folder name (slug or numeric window id) is never decoded.
+      const chatCwdByAgentId = yield* readCursorChatCwdIndex(
+        path.join(homePath, "chats"),
+        path,
+        readDirectory,
+        (filePath) => fileSystem.readFileString(filePath).pipe(Effect.option),
+      );
+
+      // Folders Cursor itself recorded; transcripts are bound to one only when
+      // Cursor's slug of exactly one of them equals the project folder name.
+      const recordedFolders: Array<string> = [];
+      for (const entry of chatCwdByAgentId.values())
+        if (entry.cwd !== null) recordedFolders.push(entry.cwd);
+      const workspaceStorage = cursorIdeWorkspaceStorageDir(
+        path,
+        hostPlatform,
+        hostEnvironment,
+        homeDir,
+      );
+      const folderByWorkspaceId = new Map<string, string>();
+      for (const workspaceId of yield* readDirectory(workspaceStorage)) {
+        const body = yield* fileSystem
+          .readFileString(path.join(workspaceStorage, workspaceId, "workspace.json"))
+          .pipe(Effect.option);
+        const folder = Option.isSome(body) ? parseCursorWorkspaceFolder(body.value) : null;
+        if (folder !== null) {
+          recordedFolders.push(folder);
+          folderByWorkspaceId.set(workspaceId, folder);
+        }
+      }
+
+      // Local SDK agents: ~/.cursor/projects/<any>/sdk-agent-store/<sha256(cwd)>/index.db
+      // lists agents with workspace_ref (the cwd) and their checkpoint stores. SDK ids are
+      // `agent-<uuid>`; the bare uuid is skipped below so chats/JSONL copies don't duplicate.
+      const sdkUuids = new Set<string>();
+      // Every SDK agent id as written (`agent-<uuid>`), T3-created ones included: their
+      // agent-transcripts JSONL copies are never imported as IDE chats.
+      const sdkAgentIds = new Set<string>();
+      for (const projectDirectory of projectDirectories) {
+        const storeParent = path.join(projectsDir, projectDirectory, "sdk-agent-store");
+        for (const storeHash of yield* readDirectory(storeParent)) {
+          const storeRoot = path.join(storeParent, storeHash);
+          const agents = yield* Effect.tryPromise(() => readCursorSdkAgent(storeRoot, null)).pipe(
+            Effect.orElseSucceed(() => []),
+          );
+          for (const agent of agents) {
+            if (agent.cwd) recordedFolders.push(agent.cwd);
+            sdkAgentIds.add(agent.agentId);
+            if (isT3CursorSdkAgent(agent)) continue;
+            const storePath = path.join(storeRoot, "agents", agent.agentDir, "store.db");
+            const stats = yield* statOption(storePath);
+            if (Option.isNone(stats) || Option.isNone(stats.value.mtime)) continue;
+            sdkUuids.add(agent.agentId.replace(/^agent-/, ""));
+            transcripts.push({
+              filePath: storePath,
+              mtimeMs: stats.value.mtime.value.getTime(),
+              providerInstanceId,
+              size: Number(stats.value.size),
+              cwd: agent.cwd,
+            });
+          }
+        }
+      }
+      // Chats with meta.json cwd and a store.db: decoded from the protobuf tree.
+      const chatStoreIds = new Set<string>();
+      for (const [agentId, entry] of chatCwdByAgentId) {
+        if (sdkUuids.has(agentId)) continue;
+        const storePath = path.join(entry.chatDir, "store.db");
+        const stats = yield* statOption(storePath);
+        if (Option.isNone(stats) || Option.isNone(stats.value.mtime)) continue;
+        chatStoreIds.add(agentId);
+        transcripts.push({
+          filePath: storePath,
+          mtimeMs: stats.value.mtime.value.getTime(),
+          providerInstanceId,
+          size: Number(stats.value.size),
+          ...(entry.cwd === null ? { orphanSessionId: agentId } : { cwd: entry.cwd }),
+        });
+      }
+
+      const slugIndex = buildCursorSlugIndex(recordedFolders);
+      for (const projectDirectory of projectDirectories) {
+        const projectCwd = slugIndex.get(projectDirectory) ?? null;
+        if (operationsRemaining <= 0) {
+          truncated = true;
+          break;
+        }
+
+        const transcriptsRoot = path.join(projectsDir, projectDirectory, "agent-transcripts");
+        // Layout: agent-transcripts/<session-id>/<session-id>.jsonl (sometimes nested one level).
+        const sessionDirs = yield* readDirectory(transcriptsRoot);
+        for (const sessionEntry of sessionDirs) {
+          if (operationsRemaining <= 0) {
+            truncated = true;
+            break;
+          }
+          const sessionPath = path.join(transcriptsRoot, sessionEntry);
+          operationsRemaining -= 1;
+          const sessionStats = yield* statOption(sessionPath);
+          if (Option.isNone(sessionStats)) continue;
+
+          const jsonlFiles: Array<string> = [];
+          if (sessionStats.value.type === "File" && sessionEntry.endsWith(".jsonl")) {
+            jsonlFiles.push(sessionPath);
+          } else if (sessionStats.value.type === "Directory") {
+            for (const entry of yield* readDirectory(sessionPath)) {
+              if (entry.endsWith(".jsonl")) jsonlFiles.push(path.join(sessionPath, entry));
+            }
+          }
+
+          for (const filePath of jsonlFiles) {
+            if (operationsRemaining <= 0) {
+              truncated = true;
+              break;
+            }
+            const transcriptId = path.basename(filePath, ".jsonl");
+            // store.db / SDK copies of the same conversation win (tree order + tool calls).
+            if (
+              chatStoreIds.has(transcriptId) ||
+              sdkUuids.has(transcriptId) ||
+              sdkAgentIds.has(transcriptId)
+            ) {
+              continue;
+            }
+            const cwd = chatCwdByAgentId.get(transcriptId)?.cwd ?? projectCwd;
+            operationsRemaining -= 1;
+            const stats = yield* statOption(filePath);
+            if (
+              Option.isNone(stats) ||
+              stats.value.type !== "File" ||
+              Option.isNone(stats.value.mtime)
+            ) {
+              continue;
+            }
+            transcripts.push({
+              filePath,
+              mtimeMs: stats.value.mtime.value.getTime(),
+              providerInstanceId,
+              size: Number(stats.value.size),
+              ...(cwd === null ? { orphanSessionId: transcriptId } : { cwd }),
+              ...(cwd === null ? {} : { sessionId: transcriptId }),
+            });
+          }
+        }
+      }
+      // Cursor copies one transcript id into several project folders (e.g. an
+      // "empty-window" folder and the workspace it moved to). Keep one bound copy
+      // per id (newest), and drop orphan copies of ids that are bound elsewhere.
+      const boundById = new Map<string, TranscriptCandidate>();
+      for (const transcript of transcripts) {
+        if (transcript.sessionId === undefined) continue;
+        const existing = boundById.get(transcript.sessionId);
+        if (existing === undefined || transcript.mtimeMs > existing.mtimeMs) {
+          boundById.set(transcript.sessionId, transcript);
+        }
+      }
+      const orphanIds = new Set<string>();
+      const deduped = transcripts.filter((transcript) => {
+        if (transcript.sessionId !== undefined) {
+          return boundById.get(transcript.sessionId) === transcript;
+        }
+        if (transcript.orphanSessionId === undefined) return true;
+        if (
+          boundById.has(transcript.orphanSessionId) ||
+          orphanIds.has(transcript.orphanSessionId)
+        ) {
+          return false;
+        }
+        orphanIds.add(transcript.orphanSessionId);
+        return true;
+      });
+      // Every composer in the IDE global DB, labeled, nothing hidden (T3 as a Cursor debugger).
+      const globalDb = cursorIdeGlobalStateDb(path, workspaceStorage);
+      const ideIndex = yield* Effect.promise(() => loadCursorIdeIndex(globalDb, workspaceStorage));
+      if (ideIndex === null) {
+        return { transcripts: deduped, truncated };
+      }
+      const workspaceFolderOf = (composerId: string, depth = 0): string | null => {
+        const entry = ideIndex.composers.get(composerId);
+        if (entry === undefined) return null;
+        const folder =
+          entry.workspaceId === null ? undefined : folderByWorkspaceId.get(entry.workspaceId);
+        if (folder !== undefined) return folder;
+        // A subagent without its own workspace id runs in its (unique) parent's workspace.
+        const parent = ideIndex.parentOf.get(composerId);
+        if (parent !== undefined && depth <= 8) return workspaceFolderOf(parent, depth + 1);
+        // Daniel's decision: a chat whose file paths all lie under one known folder is
+        // assigned there, labeled "from file paths".
+        return ideIndex.pathFolderOf.get(composerId) ?? null;
+      };
+      const labeled = deduped.map((transcript): TranscriptCandidate => {
+        const id = transcript.sessionId ?? transcript.orphanSessionId;
+        const entry = id === undefined ? undefined : ideIndex.composers.get(id);
+        if (id === undefined || entry === undefined) return transcript;
+        // An orphan transcript is bound when its composer's workspace id proves the folder.
+        const provenCwd = transcript.orphanSessionId === undefined ? null : workspaceFolderOf(id);
+        const { orphanSessionId: _orphan, ...rest } = transcript;
+        return {
+          ...(provenCwd === null ? transcript : { ...rest, cwd: provenCwd, sessionId: id }),
+          ...(entry.name === null ? {} : { title: entry.name }),
+          labels: cursorIdeComposerLabels(ideIndex, id),
+        };
+      });
+      const represented = new Set<string>([
+        ...boundById.keys(),
+        ...orphanIds,
+        ...chatStoreIds,
+        ...sdkUuids,
+        ...[...sdkAgentIds].map((id) => id.replace(/^agent-/, "")),
+      ]);
+      for (const entry of ideIndex.composers.values()) {
+        if (represented.has(entry.composerId)) continue;
+        const cwd = workspaceFolderOf(entry.composerId);
+        labeled.push({
+          filePath: cursorIdeComposerPath(globalDb, entry.composerId),
+          mtimeMs: entry.lastUpdatedAtMs ?? entry.createdAtMs ?? 0,
+          providerInstanceId,
+          size: 0,
+          ...(cwd === null
+            ? { orphanSessionId: entry.composerId }
+            : { cwd, sessionId: entry.composerId }),
+          ...(entry.name === null ? {} : { title: entry.name }),
+          labels: cursorIdeComposerLabels(ideIndex, entry.composerId),
+        });
+      }
+      return { transcripts: labeled, truncated };
+    },
+  );
+
   const discoverCodexTranscripts = Effect.fn("AgentSessionScanner.discoverCodexTranscripts")(
     function* (homePath: string, providerInstanceId: ProviderInstanceId, operationBudget: number) {
       const sessionsDir = path.join(homePath, "sessions");
@@ -1045,13 +1541,25 @@ export const make = Effect.gen(function* () {
         cwd: string;
         providerInstanceId: ProviderInstanceId;
         lastActiveAtMs: number;
-        transcripts: Array<{ filePath: string; mtimeMs: number }>;
+        transcripts: Array<TranscriptCandidate>;
       }
     >();
 
+    const orphans: Array<AgentSessionOrphan> = [];
     for (const transcript of transcripts) {
-      const cwd = yield* readCwd(transcript, budget);
-      if (cwd === null) continue;
+      if (transcript.orphanSessionId !== undefined) {
+        orphans.push(orphanOf(source, transcript.orphanSessionId, transcript.mtimeMs));
+        continue;
+      }
+      const cwd = transcript.cwd ?? (yield* readCwd(transcript, budget));
+      if (cwd === null) {
+        // Only a completed read without cwd proves "no cwd"; a budget cut proves nothing.
+        if (!budget.truncated) {
+          const id = path.basename(transcript.filePath).replace(/\.jsonl$/, "");
+          orphans.push(orphanOf(source, id, transcript.mtimeMs));
+        }
+        continue;
+      }
       const key = `${transcript.providerInstanceId}\0${cwd}`;
       const existing = byOwnerAndCwd.get(key);
       if (existing) {
@@ -1067,14 +1575,36 @@ export const make = Effect.gen(function* () {
       }
     }
 
-    return Array.from(byOwnerAndCwd.values(), (group): RawCandidate => ({
+    const groups = Array.from(byOwnerAndCwd.values(), (group): RawCandidate => ({
       cwd: group.cwd,
       source,
       providerInstanceId: group.providerInstanceId,
       threadCount: group.transcripts.length,
       lastActiveAtMs: group.lastActiveAtMs,
       transcripts: group.transcripts,
+      threads: group.transcripts.map((transcript) => ({
+        source,
+        providerSessionId:
+          transcript.sessionId ??
+          (/\.(db|json)$/.test(transcript.filePath)
+            ? path.basename(path.dirname(transcript.filePath))
+            : path.basename(transcript.filePath).replace(/\.jsonl$/, "")),
+        lastActiveAt: DateTime.formatIso(DateTime.makeUnsafe(transcript.mtimeMs)),
+        ...(transcript.title === undefined ? {} : { title: transcript.title }),
+        labels:
+          transcript.labels ??
+          (source !== "cursor"
+            ? []
+            : path.basename(transcript.filePath) === "store.db"
+              ? [
+                  path.basename(path.dirname(path.dirname(transcript.filePath))) === "agents"
+                    ? "SDK"
+                    : "CLI",
+                ]
+              : ["transcript"]),
+      })),
     }));
+    return { groups, orphans };
   });
 
   const collectCandidates = Effect.fn("AgentSessionScanner.collectCandidates")(function* () {
@@ -1083,9 +1613,10 @@ export const make = Effect.gen(function* () {
     );
 
     const raw: Array<RawCandidate> = [];
+    const orphans: Array<AgentSessionOrphan> = [];
     let truncated = false;
 
-    for (const source of ["claudeAgent", "codex"] as const) {
+    for (const source of ["claudeAgent", "codex", "cursor"] as const) {
       const instances: Array<{
         readonly instanceId: ProviderInstanceId;
         readonly config: ProviderInstanceConfig;
@@ -1119,29 +1650,35 @@ export const make = Effect.gen(function* () {
       const homes: Array<{ homePath: string; providerInstanceId: ProviderInstanceId }> = [];
       const seenHomes = new Set<string>();
       for (const { instanceId, config: instance } of instances) {
-        const homeVariable = source === "claudeAgent" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME";
-        const environmentHome =
-          instance.environment?.findLast((variable) => variable.name === homeVariable)?.value ??
-          hostEnvironment[homeVariable];
-
         let homePath: string;
-        if (source === "claudeAgent") {
-          const config = decodeClaudeSettings(instance.config ?? {});
-          if (Option.isNone(config)) continue;
-          homePath = resolveClaudeConfigDir(config.value.homePath, environmentHome);
+        if (source === "cursor") {
+          // Agent transcripts live under ~/.cursor/projects, not the AppData
+          // login folder that Cursor homePath points at.
+          homePath = path.join(homeDir, ".cursor");
         } else {
-          const config = decodeCodexSettings(instance.config ?? {});
-          if (Option.isNone(config)) continue;
-          const codexSettings =
-            config.value.homePath.trim().length === 0 &&
-            config.value.shadowHomePath.trim().length === 0 &&
-            environmentHome?.trim()
-              ? { ...config.value, homePath: environmentHome }
-              : config.value;
-          const layout = yield* resolveCodexHomeLayout(codexSettings).pipe(
-            Effect.provideService(Path.Path, path),
-          );
-          homePath = layout.sharedHomePath;
+          const homeVariable = source === "claudeAgent" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME";
+          const environmentHome =
+            instance.environment?.findLast((variable) => variable.name === homeVariable)?.value ??
+            hostEnvironment[homeVariable];
+
+          if (source === "claudeAgent") {
+            const config = decodeClaudeSettings(instance.config ?? {});
+            if (Option.isNone(config)) continue;
+            homePath = resolveClaudeConfigDir(config.value.homePath, environmentHome);
+          } else {
+            const config = decodeCodexSettings(instance.config ?? {});
+            if (Option.isNone(config)) continue;
+            const codexSettings =
+              config.value.homePath.trim().length === 0 &&
+              config.value.shadowHomePath.trim().length === 0 &&
+              environmentHome?.trim()
+                ? { ...config.value, homePath: environmentHome }
+                : config.value;
+            const layout = yield* resolveCodexHomeLayout(codexSettings).pipe(
+              Effect.provideService(Path.Path, path),
+            );
+            homePath = layout.sharedHomePath;
+          }
         }
 
         const homeKey = `${source}\0${yield* directoryIdentity(homePath)}`;
@@ -1163,7 +1700,9 @@ export const make = Effect.gen(function* () {
         }
         const discovered = yield* source === "claudeAgent"
           ? discoverClaudeTranscripts(home.homePath, home.providerInstanceId, operationBudget)
-          : discoverCodexTranscripts(home.homePath, home.providerInstanceId, operationBudget);
+          : source === "cursor"
+            ? discoverCursorTranscripts(home.homePath, home.providerInstanceId, operationBudget)
+            : discoverCodexTranscripts(home.homePath, home.providerInstanceId, operationBudget);
         truncated ||= discovered.truncated;
         transcriptCandidates.push(...discovered.transcripts);
       }
@@ -1183,17 +1722,19 @@ export const make = Effect.gen(function* () {
         recordsRemaining: MAX_METADATA_RECORDS_PER_SOURCE,
         truncated: false,
       };
-      raw.push(...(yield* groupTranscriptsByCwd(source, selectedTranscripts, metadataBudget)));
+      const grouped = yield* groupTranscriptsByCwd(source, selectedTranscripts, metadataBudget);
+      raw.push(...grouped.groups);
+      orphans.push(...grouped.orphans);
       truncated ||= metadataBudget.truncated;
     }
 
-    return { candidates: raw, truncated };
+    return { candidates: raw, orphans, truncated };
   });
 
   let cachedCandidates: ReadonlyArray<RawCandidate> | null = null;
 
   const scan: AgentSessionScanner["Service"]["scan"] = Effect.gen(function* () {
-    const { candidates: raw, truncated } = yield* collectCandidates();
+    const { candidates: raw, orphans, truncated } = yield* collectCandidates();
     cachedCandidates = raw;
 
     // Filesystem identity merges symlinks and case aliases without collapsing
@@ -1206,6 +1747,7 @@ export const make = Effect.gen(function* () {
         threadCount: number;
         lastActiveAtMs: number | null;
         git: AgentSessionProjectGit | null;
+        threads: Array<AgentSessionCandidateThread>;
       }
     >();
     const directoryKeys = new Map<string, string>();
@@ -1252,6 +1794,7 @@ export const make = Effect.gen(function* () {
           threadCount: candidate.threadCount,
           lastActiveAtMs: candidate.lastActiveAtMs,
           git: gitIdentities.get(key) ?? null,
+          threads: [...(candidate.threads ?? [])],
         });
         continue;
       }
@@ -1259,6 +1802,7 @@ export const make = Effect.gen(function* () {
         existing.sources.push(candidate.source);
       }
       existing.threadCount += candidate.threadCount;
+      existing.threads.push(...(candidate.threads ?? []));
       existing.lastActiveAtMs =
         existing.lastActiveAtMs === null || candidate.lastActiveAtMs === null
           ? (existing.lastActiveAtMs ?? candidate.lastActiveAtMs)
@@ -1301,6 +1845,9 @@ export const make = Effect.gen(function* () {
             : DateTime.formatIso(DateTime.makeUnsafe(entry.lastActiveAtMs)),
         alreadyImported: importedProject !== undefined,
         git: entry.git,
+        threads: entry.threads
+          .toSorted((l, r) => r.lastActiveAt.localeCompare(l.lastActiveAt))
+          .slice(0, MAX_CANDIDATE_THREADS),
       });
     }
 
@@ -1315,6 +1862,13 @@ export const make = Effect.gen(function* () {
     return {
       candidates,
       scannedAt: DateTime.formatIso(yield* DateTime.now),
+      ...(orphans.length > 0
+        ? {
+            orphans: orphans.toSorted((l, r) =>
+              (r.lastActiveAt ?? "").localeCompare(l.lastActiveAt ?? ""),
+            ),
+          }
+        : {}),
       ...(truncated ? { truncated: true } : {}),
     };
   });
@@ -1346,7 +1900,8 @@ export const make = Effect.gen(function* () {
       for (const transcript of candidate.transcripts) {
         if (
           transcript.mtimeMs === null ||
-          transcript.mtimeMs < cutoffMs ||
+          // Cursor is imported in full (debugger use): no recency window, only batching.
+          (candidate.source !== "cursor" && transcript.mtimeMs < cutoffMs) ||
           transcript.mtimeMs > nowMs
         ) {
           continue;
@@ -1385,11 +1940,24 @@ export const make = Effect.gen(function* () {
           ) {
             return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
           }
-          const stats = yield* statOption(transcript.filePath);
+          const ideComposer = parseCursorIdeComposerPath(transcript.filePath);
+          // IDE-DB-only composers have no file of their own; their identity is the
+          // composer id plus its lastUpdatedAt, so an updated chat re-imports.
+          const stats = yield* statOption(ideComposer?.globalDb ?? transcript.filePath);
           if (Option.isNone(stats) || stats.value.type !== "File") {
             return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
           }
-          const identity = transcriptIdentity(transcript.filePath, stats.value);
+          const identity =
+            ideComposer === null
+              ? transcriptIdentity(transcript.filePath, stats.value)
+              : {
+                  filePath: transcript.filePath,
+                  size: 0,
+                  mtimeMs: transcript.mtimeMs,
+                  device: 0,
+                  inode: null,
+                  birthtimeMs: null,
+                };
           const completedSource = completed?.find(
             (source) =>
               source.provider === candidate.source && sameTranscriptIdentity(source, identity),
@@ -1414,6 +1982,64 @@ export const make = Effect.gen(function* () {
           // Reserve the whole file even if its read or parse fails.
           transcriptsRemaining -= 1;
           bytesRemaining -= identity.size;
+          if (candidate.source === "cursor" && path.basename(transcript.filePath) === "store.db") {
+            const storeThread = yield* readCursorStoreThread(
+              transcript.filePath,
+              candidate.cwd,
+              candidate.providerInstanceId,
+              transcript.mtimeMs,
+            );
+            if (storeThread === null) {
+              return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
+            }
+            const source: AgentSessionImportSource = {
+              ...identity,
+              provider: "cursor",
+              providerInstanceId: storeThread.providerInstanceId,
+              providerSessionId: storeThread.providerSessionId,
+            };
+            const sessionKey = `${storeThread.providerInstanceId}\0${storeThread.providerSessionId}`;
+            if (importedSessions.has(sessionKey)) {
+              return Option.some<AgentSessionRecentThread>({ _tag: "Duplicate", source });
+            }
+            importedSessions.add(sessionKey);
+            return Option.some<AgentSessionRecentThread>({
+              _tag: "Importable",
+              thread: storeThread,
+              source,
+            });
+          }
+          // Cursor IDE transcripts: prefer the IDE state DB (thinking, tool calls and
+          // results); fall back to the bare JSONL when the composer is not there.
+          if (
+            candidate.source === "cursor" &&
+            (transcript.filePath.endsWith(".jsonl") || ideComposer !== null)
+          ) {
+            const ideThread = yield* readCursorStoreThread(
+              transcript.filePath,
+              candidate.cwd,
+              candidate.providerInstanceId,
+              transcript.mtimeMs,
+            );
+            if (ideThread !== null) {
+              const source: AgentSessionImportSource = {
+                ...identity,
+                provider: "cursor",
+                providerInstanceId: ideThread.providerInstanceId,
+                providerSessionId: ideThread.providerSessionId,
+              };
+              const sessionKey = `${ideThread.providerInstanceId}\0${ideThread.providerSessionId}`;
+              if (importedSessions.has(sessionKey)) {
+                return Option.some<AgentSessionRecentThread>({ _tag: "Duplicate", source });
+              }
+              importedSessions.add(sessionKey);
+              return Option.some<AgentSessionRecentThread>({
+                _tag: "Importable",
+                thread: ideThread,
+                source,
+              });
+            }
+          }
           const snapshot = yield* readTranscript(
             transcript.filePath,
             identity,
@@ -1431,6 +2057,8 @@ export const make = Effect.gen(function* () {
             snapshotCwd = extractDecodedCwd(record);
             if (snapshotCwd !== null) break;
           }
+          // Cursor transcripts omit cwd; chats meta.json already supplied it.
+          if (snapshotCwd === null) snapshotCwd = candidate.cwd;
           if (snapshotCwd === null) {
             return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
           }

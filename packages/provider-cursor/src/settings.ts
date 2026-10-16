@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Cursor instance settings. Shared by the server driver and the client
  * settings form, so it holds only browser-safe schema code.
  *
@@ -22,6 +22,27 @@ export const CursorSettings = makeProviderSettingsSchema(
     ),
     apiEndpoint: Schema.optionalKey(TrimmedString).pipe(
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+    // Opt-in: installs T3's hook in ~/.cursor/hooks.json so shell commands,
+    // MCP calls and file edits wait for approval in T3 (approval-required mode).
+    approvalHooks: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(false)),
+      Schema.annotateKey({
+        title: "Approval hooks",
+        description:
+          "Install T3's hook in ~/.cursor/hooks.json so commands and file edits wait for approval in T3.",
+      }),
+    ),
+    // This instance's Cursor config folder, like Claude's CLAUDE_CONFIG_DIR and
+    // Codex's CODEX_HOME. Empty is the machine's standard Cursor login.
+    homePath: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "Cursor home path (unofficial)",
+        description:
+          "Custom Cursor config folder for this account's CLI login (APPDATA on Windows, XDG_CONFIG_HOME elsewhere). Empty uses the standard login.",
+        providerSettingsForm: { placeholder: "standard login", clearWhenEmpty: "omit" },
+      }),
     ),
     customModels: Schema.Array(CustomModelSetting).pipe(
       Schema.withDecodingDefault(Effect.succeed([])),

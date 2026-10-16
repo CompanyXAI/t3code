@@ -7,6 +7,7 @@ import { cn } from "../../lib/utils";
 import type { SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
 import { useEnvironments, type EnvironmentPresentation } from "../../state/environments";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
+import { MACHINE_NAME_REDACT_PROPS, RedactedSensitiveText } from "./RedactedSensitiveText";
 import { ProjectFavicon } from "../ProjectFavicon";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { ITEM_ROW_CLASSNAME } from "./itemRows";
@@ -25,6 +26,7 @@ interface ScopeChoice {
   secondary?: string;
   icon: ReactNode;
   search: SettingsScopeSearch;
+  redact?: boolean;
 }
 
 /** Offer an explicit target change when a category has no settings at this scope. */
@@ -76,6 +78,7 @@ export function SettingsScopeNotice({
               machine: member.environmentId,
               checkout: member.physicalProjectKey,
             },
+            redact: true,
           };
         })
       : target === "project"
@@ -107,6 +110,7 @@ export function SettingsScopeNotice({
                   secondary: secondary || settingsScopeEnvironmentAddress(entry),
                   icon: environmentIcon(entry),
                   search: { machine: entry.environmentId },
+                  redact: true,
                 };
               })
           : [
@@ -132,13 +136,29 @@ export function SettingsScopeNotice({
       >
         {choice.icon}
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-sm font-medium">{choice.label}</span>
+          {choice.redact ? (
+            <RedactedSensitiveText
+              value={choice.label}
+              {...MACHINE_NAME_REDACT_PROPS}
+              className="block truncate text-sm font-medium"
+            />
+          ) : (
+            <span className="block truncate text-sm font-medium">{choice.label}</span>
+          )}
           {choice.secondary ? (
             <Tooltip>
               <TooltipTrigger
                 render={<span className="block truncate text-xs text-muted-foreground" />}
               >
-                {choice.secondary}
+                {choice.redact ? (
+                  <RedactedSensitiveText
+                    value={choice.secondary}
+                    {...MACHINE_NAME_REDACT_PROPS}
+                    className="block truncate text-xs text-muted-foreground"
+                  />
+                ) : (
+                  choice.secondary
+                )}
               </TooltipTrigger>
               <TooltipPopup>{choice.secondary}</TooltipPopup>
             </Tooltip>

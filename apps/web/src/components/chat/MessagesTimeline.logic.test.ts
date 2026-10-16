@@ -258,6 +258,30 @@ describe("work entry labels", () => {
     expect(workEntryReadOutput({ detail: "---", toolData: {} }, undefined)).toBeNull();
   });
 
+  it("shows the read line range for Claude and imported Cursor reads", () => {
+    const read = (input: Record<string, unknown>) => ({
+      ...entry,
+      itemType: "dynamic_tool" as const,
+      toolTitle: "Read",
+      label: "Read",
+      toolData: { input },
+      structuredPayload: {
+        type: "dynamic_tool",
+        toolName: "Read",
+        input,
+      } as NonNullable<WorkLogEntry["structuredPayload"]>,
+    });
+    expect(
+      workEntryDisplayLabel(read({ file_path: "src/env.ts", offset: 120, limit: 61 }), undefined),
+    ).toBe("Read src/env.ts · L120–180");
+    expect(workEntryDisplayLabel(read({ file_path: "a.ts", limit: 40 }), undefined)).toBe(
+      "Read a.ts · L1–40",
+    );
+    expect(workEntryDisplayLabel(read({ file_path: "a.ts", offset: 80 }), undefined)).toBe(
+      "Read a.ts · L80+",
+    );
+    expect(workEntryDisplayLabel(read({ file_path: "a.ts" }), undefined)).toBe("Read a.ts");
+  });
   it("labels Claude Grep from structured input instead of a generic tool heading", () => {
     expect(
       workEntryDisplayLabel(

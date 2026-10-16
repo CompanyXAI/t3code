@@ -787,15 +787,56 @@ function compactModelSelectionByProvider(
   return Object.fromEntries(entries) as DeepMutable<Record<ProviderInstanceId, ModelSelection>>;
 }
 
+/**
+ * Options that belong to one chat and must not carry over into a new one:
+ * Cursor's "Runs on" (this PC / worker / cloud) starts at its default.
+ */
+const PER_CHAT_OPTION_IDS: ReadonlySet<string> = new Set(["runsOn"]);
+
+/**
+ * Switching account or model inside a chat keeps that chat's per-chat options
+ * (Cursor's "Runs on"), so a worker or cloud chat does not fall back to this PC.
+ */
+/** Drops per-chat options (Cursor's "Runs on"), e.g. when a draft moves to another machine. */
+export function dropPerChatOptions(selection: ModelSelection): ModelSelection {
+  if (!selection.options?.some((option) => PER_CHAT_OPTION_IDS.has(option.id))) return selection;
+  return {
+    ...selection,
+    options: selection.options.filter((option) => !PER_CHAT_OPTION_IDS.has(option.id)),
+  };
+}
+
+export function keepPerChatOptions(
+  next: ModelSelection,
+  current: Pick<ModelSelection, "options"> | null | undefined,
+): ModelSelection {
+  const carried = (current?.options ?? []).filter(
+    (option) =>
+      PER_CHAT_OPTION_IDS.has(option.id) && !next.options?.some((own) => own.id === option.id),
+  );
+  return carried.length === 0 ? next : { ...next, options: [...(next.options ?? []), ...carried] };
+}
+
+function withoutPerChatOptions(
+  selections: DeepMutable<Record<ProviderInstanceId, ModelSelection>>,
+): DeepMutable<Record<ProviderInstanceId, ModelSelection>> {
+  for (const selection of Object.values(selections)) {
+    if (selection.options?.some((option) => PER_CHAT_OPTION_IDS.has(option.id))) {
+      selection.options = selection.options.filter((option) => !PER_CHAT_OPTION_IDS.has(option.id));
+    }
+  }
+  return selections;
+}
 function compactStickyOptionsByModel(
   optionsByModelByProvider: ComposerDraftStoreState["stickyOptionsByModelByProvider"],
 ): NonNullable<PersistedComposerDraftStoreState["stickyOptionsByModelByProvider"]> {
   const result: Record<string, Record<string, ReadonlyArray<ProviderOptionSelection>>> = {};
   for (const [instanceId, optionsByModel] of Object.entries(optionsByModelByProvider)) {
     for (const [modelSlug, options] of Object.entries(optionsByModel ?? {})) {
-      if (options === undefined || options.length === 0) continue;
+      const kept = options?.filter((option) => !PER_CHAT_OPTION_IDS.has(option.id));
+      if (kept === undefined || kept.length === 0) continue;
       result[instanceId] ??= {};
-      result[instanceId][modelSlug] = options;
+      result[instanceId][modelSlug] = kept;
     }
   }
   return result as NonNullable<PersistedComposerDraftStoreState["stickyOptionsByModelByProvider"]>;
@@ -3068,7 +3109,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             const stickyActiveProvider = state.stickyActiveProvider;
             const existing = state.draftsByThreadKey[threadKey];
             const base = existing ?? createEmptyThreadDraft();
-            const nextMap = compactModelSelectionByProvider(stickyMap);
+            const nextMap = withoutPerChatOptions(compactModelSelectionByProvider(stickyMap));
             if (
               Equal.equals(base.modelSelectionByProvider, nextMap) &&
               base.activeProvider === stickyActiveProvider &&
@@ -3309,7 +3350,9 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                   ...state.stickyOptionsByModelByProvider,
                   [instanceKey]: {
                     ...state.stickyOptionsByModelByProvider[instanceKey],
-                    [rememberedModel]: providerOpts,
+                    [rememberedModel]: providerOpts.filter(
+                      (option) => !PER_CHAT_OPTION_IDS.has(option.id),
+                    ),
                   },
                 };
               } else if ((stickyBase.options?.length ?? 0) > 0) {

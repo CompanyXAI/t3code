@@ -165,6 +165,8 @@ import * as CursorAccountReader from "@t3tools/provider-cursor/server/CursorAcco
 import * as CursorKeychain from "@t3tools/provider-cursor/server/CursorKeychain";
 import * as CursorUsageAccounts from "@t3tools/provider-cursor/server/CursorUsageAccounts";
 import * as UsageService from "./usage/UsageService.ts";
+import * as UsagePolicyService from "./usage/UsagePolicyService.ts";
+import * as ProviderUsageDaily from "./persistence/ProviderUsageDaily.ts";
 import * as RuntimeLayer from "./orchestration-v2/runtimeLayer.ts";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as ThreadSearch from "./orchestration-v2/ThreadSearch.ts";
@@ -267,6 +269,11 @@ const layerUsage = UsageService.layer.pipe(
       ),
     ).pipe(Layer.provide(ProviderHostLive.layer.pipe(Layer.provide(ServerSecretStore.layer)))),
   ),
+  Layer.provide(layerServerSettings),
+);
+
+const layerUsagePolicy = UsagePolicyService.layer.pipe(
+  Layer.provide(ProviderUsageDaily.layer),
   Layer.provide(layerServerSettings),
 );
 
@@ -620,6 +627,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   // through this layer. Built-in drivers come from `BUILT_IN_DRIVERS`;
   // hydration adds their default instances to `providerInstances` on boot.
   Layer.provideMerge(ProviderInstanceRegistryHydration.layer),
+  Layer.provideMerge(layerUsagePolicy),
   Layer.provideMerge(
     Layer.mergeAll(
       AntigravityInstallation.AntigravityInstallation.layer,

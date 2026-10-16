@@ -86,6 +86,7 @@ const RPC_AGGREGATES = {
   [WS_METHODS.serverReportClientActivity]: "server",
   [WS_METHODS.serverReportHostPowerState]: "server",
   [WS_METHODS.serverGetBackgroundPolicy]: "server",
+  [WS_METHODS.serverGetUsagePolicyStatus]: "server",
   [WS_METHODS.scheduledTasksList]: "scheduledTasks",
   [WS_METHODS.scheduledTasksSubscribe]: "scheduledTasks",
   [WS_METHODS.scheduledTasksUpsert]: "scheduledTasks",
@@ -149,6 +150,16 @@ const RPC_AGGREGATES = {
   [WS_METHODS.filesystemGetMetadata]: "workspace",
   [WS_METHODS.agentSessionsScan]: "workspace",
   [WS_METHODS.agentSessionsImport]: "workspace",
+  [WS_METHODS.cursorAgentsList]: "provider",
+  [WS_METHODS.cursorAgentsFollow]: "provider",
+  [WS_METHODS.cursorAgentsLaunch]: "provider",
+  [WS_METHODS.cursorAgentsFollowUp]: "provider",
+  [WS_METHODS.cursorAgentsStop]: "provider",
+  [WS_METHODS.cursorAgentsApprovals]: "provider",
+  [WS_METHODS.cursorAgentsRespondApproval]: "provider",
+  [WS_METHODS.cursorAgentsHookSetup]: "provider",
+  [WS_METHODS.cursorAgentsMachine]: "provider",
+  [WS_METHODS.cursorAgentsProjectHooks]: "provider",
   [WS_METHODS.assetsCreateUrl]: "workspace",
   [WS_METHODS.assetsPersistChatAttachments]: "orchestration",
   [WS_METHODS.attachmentsCreateUploadUrl]: "workspace",
@@ -210,6 +221,7 @@ const RPC_AGGREGATES = {
   [WS_METHODS.subscribeServerLifecycle]: "server",
   [WS_METHODS.subscribeAuthAccess]: "auth",
   [WS_METHODS.subscribeBackgroundPolicy]: "server",
+  [WS_METHODS.subscribeUsagePolicyStatus]: "server",
 } as const satisfies Readonly<Record<WsRpcMethod, string>>;
 
 const RPC_SPAN_PREFIX = "ws.rpc";

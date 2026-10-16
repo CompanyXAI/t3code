@@ -1,5 +1,8 @@
+// @effect-diagnostics nodeBuiltinImport:off - builds a synthetic Cursor SDK index.db.
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
+import * as NodeSqlite from "node:sqlite";
 import { describe, expect, it } from "@effect/vitest";
 import {
   type OrchestrationProjectShell,
@@ -18,10 +21,12 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as ServerConfig from "../config.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as AgentSessionScanner from "./AgentSessionScanner.ts";
+import { cursorProjectSlug } from "./CursorAgentSessionPaths.ts";
 
 const makeProjectShell = (workspaceRoot: string): OrchestrationProjectShell => ({
   id: ProjectId.make("project-1"),
@@ -48,11 +53,21 @@ const layerProjectStore = (importedWorkspaceRoots: ReadonlyArray<string>) =>
 interface ScannerTestInput {
   readonly claudeHomePath: string;
   readonly codexHomePath: string;
+  /** When set, `~/.cursor/projects` is resolved under this home (Cursor import). */
+  readonly userHomePath?: string;
   readonly importedWorkspaceRoots?: ReadonlyArray<string>;
   /** Base dir for the test ServerConfig; worktreesDir derives from it. */
   readonly configBaseDir?: string;
   readonly providerInstances?: ContractServerSettings["providerInstances"];
+  /** Parent of the Cursor IDE user-data dir; defaults to a path that does not exist. */
+  readonly cursorIdeUserDataRoot?: string;
 }
+
+const NO_CURSOR_IDE_ROOT = "/nonexistent/t3code-test-no-cursor-ide";
+
+/** Candidate summaries without the per-chat list (asserted separately where relevant). */
+const withoutThreads = <T extends { readonly threads?: unknown }>(candidates: ReadonlyArray<T>) =>
+  candidates.map(({ threads: _threads, ...rest }) => rest);
 
 const layerScannerTest = (input: ScannerTestInput) =>
   AgentSessionScanner.layer.pipe(
@@ -78,6 +93,15 @@ const layerScannerTest = (input: ScannerTestInput) =>
           input.configBaseDir ?? { prefix: "t3code-scanner-config-" },
         ),
         layerProjectStore(input.importedWorkspaceRoots ?? []),
+        // Never read the real Cursor IDE data (APPDATA / XDG) of the machine running tests.
+        Layer.succeed(HostProcess.Environment, {
+          ...process.env,
+          APPDATA: input.cursorIdeUserDataRoot ?? NO_CURSOR_IDE_ROOT,
+          XDG_CONFIG_HOME: input.cursorIdeUserDataRoot ?? NO_CURSOR_IDE_ROOT,
+        }),
+        ...(input.userHomePath === undefined
+          ? []
+          : [Layer.succeed(HostProcess.HomeDirectory, input.userHomePath)]),
       ),
     ),
   );
@@ -188,7 +212,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
 
         const result = yield* runScan({ claudeHomePath, codexHomePath });
 
-        expect(result.candidates).toEqual([
+        expect(withoutThreads(result.candidates)).toEqual([
           {
             path: newerWorkspace,
             title: path.basename(newerWorkspace),
@@ -240,7 +264,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
 
         const result = yield* runScan({ claudeHomePath, codexHomePath });
 
-        expect(result.candidates).toEqual([
+        expect(withoutThreads(result.candidates)).toEqual([
           {
             path: otherWorkspace,
             title: path.basename(otherWorkspace),
@@ -290,7 +314,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
             Effect.provideService(FileSystem.FileSystem, simulatedFileSystem),
           );
 
-          expect(result.candidates).toEqual([]);
+          expect(withoutThreads(result.candidates)).toEqual([]);
           expect(transcriptOpenCount).toBe(0);
         }),
     );
@@ -331,7 +355,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
             Effect.provideService(FileSystem.FileSystem, simulatedFileSystem),
           );
 
-          expect(result.candidates).toEqual([]);
+          expect(withoutThreads(result.candidates)).toEqual([]);
           expect(directoryReadCount).toBe(20_000);
         }),
     );
@@ -367,7 +391,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
           importedWorkspaceRoots: [workspace],
         });
 
-        expect(result.candidates).toEqual([
+        expect(withoutThreads(result.candidates)).toEqual([
           {
             path: workspace,
             title: path.basename(workspace),
@@ -382,68 +406,72 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
       }),
     );
 
-    it.effect("returns the imported project ID through a realpath alias", () =>
-      Effect.gen(function* () {
-        const path = yield* Path.Path;
-        const fileSystem = yield* FileSystem.FileSystem;
-        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
-        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
-        const workspace = yield* makeTempDir("t3code-workspace-");
-        const linkParent = yield* makeTempDir("t3code-scanner-links-");
-        const workspaceAlias = path.join(linkParent, "workspace-alias");
-        yield* fileSystem.symlink(workspace, workspaceAlias);
+    it.effect.skipIf(!symlinksSupported)(
+      "returns the imported project ID through a realpath alias",
+      () =>
+        Effect.gen(function* () {
+          const path = yield* Path.Path;
+          const fileSystem = yield* FileSystem.FileSystem;
+          const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+          const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+          const workspace = yield* makeTempDir("t3code-workspace-");
+          const linkParent = yield* makeTempDir("t3code-scanner-links-");
+          const workspaceAlias = path.join(linkParent, "workspace-alias");
+          yield* fileSystem.symlink(workspace, workspaceAlias);
 
-        yield* writeTranscript({
-          filePath: path.join(claudeHomePath, "projects", "-slug", "a.jsonl"),
-          contents: claudeSessionLine(workspaceAlias),
-          mtimeMs: Date.parse("2026-01-01T00:00:00.000Z"),
-        });
+          yield* writeTranscript({
+            filePath: path.join(claudeHomePath, "projects", "-slug", "a.jsonl"),
+            contents: claudeSessionLine(workspaceAlias),
+            mtimeMs: Date.parse("2026-01-01T00:00:00.000Z"),
+          });
 
-        const result = yield* runScan({
-          claudeHomePath,
-          codexHomePath,
-          importedWorkspaceRoots: [workspace],
-        });
+          const result = yield* runScan({
+            claudeHomePath,
+            codexHomePath,
+            importedWorkspaceRoots: [workspace],
+          });
 
-        expect(result.candidates[0]).toMatchObject({
-          path: workspace,
-          projectId: ProjectId.make("project-1"),
-          alreadyImported: true,
-          git: null,
-        });
-      }),
+          expect(result.candidates[0]).toMatchObject({
+            path: workspace,
+            projectId: ProjectId.make("project-1"),
+            alreadyImported: true,
+            git: null,
+          });
+        }),
     );
 
-    it.effect("matches a persisted project alias to a transcript realpath", () =>
-      Effect.gen(function* () {
-        const path = yield* Path.Path;
-        const fileSystem = yield* FileSystem.FileSystem;
-        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
-        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
-        const workspace = yield* makeTempDir("t3code-workspace-");
-        const linkParent = yield* makeTempDir("t3code-scanner-links-");
-        const workspaceAlias = path.join(linkParent, "workspace-alias");
-        yield* fileSystem.symlink(workspace, workspaceAlias);
+    it.effect.skipIf(!symlinksSupported)(
+      "matches a persisted project alias to a transcript realpath",
+      () =>
+        Effect.gen(function* () {
+          const path = yield* Path.Path;
+          const fileSystem = yield* FileSystem.FileSystem;
+          const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+          const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+          const workspace = yield* makeTempDir("t3code-workspace-");
+          const linkParent = yield* makeTempDir("t3code-scanner-links-");
+          const workspaceAlias = path.join(linkParent, "workspace-alias");
+          yield* fileSystem.symlink(workspace, workspaceAlias);
 
-        yield* writeTranscript({
-          filePath: path.join(claudeHomePath, "projects", "-slug", "a.jsonl"),
-          contents: claudeSessionLine(workspace),
-          mtimeMs: Date.parse("2026-01-01T00:00:00.000Z"),
-        });
+          yield* writeTranscript({
+            filePath: path.join(claudeHomePath, "projects", "-slug", "a.jsonl"),
+            contents: claudeSessionLine(workspace),
+            mtimeMs: Date.parse("2026-01-01T00:00:00.000Z"),
+          });
 
-        const result = yield* runScan({
-          claudeHomePath,
-          codexHomePath,
-          importedWorkspaceRoots: [workspaceAlias],
-        });
+          const result = yield* runScan({
+            claudeHomePath,
+            codexHomePath,
+            importedWorkspaceRoots: [workspaceAlias],
+          });
 
-        expect(result.candidates[0]).toMatchObject({
-          path: workspaceAlias,
-          projectId: ProjectId.make("project-1"),
-          alreadyImported: true,
-          git: null,
-        });
-      }),
+          expect(result.candidates[0]).toMatchObject({
+            path: workspaceAlias,
+            projectId: ProjectId.make("project-1"),
+            alreadyImported: true,
+            git: null,
+          });
+        }),
     );
 
     it.effect("merges case aliases and preserves the persisted project path", () =>
@@ -479,7 +507,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
           importedWorkspaceRoots: [workspace],
         }).pipe(Effect.provideService(FileSystem.FileSystem, simulatedFileSystem));
 
-        expect(result.candidates).toEqual([
+        expect(withoutThreads(result.candidates)).toEqual([
           {
             path: workspace,
             title: path.basename(workspace),
@@ -757,7 +785,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
           },
         });
 
-        expect(result.candidates).toEqual([]);
+        expect(withoutThreads(result.candidates)).toEqual([]);
       }),
     );
 
@@ -776,7 +804,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
 
         const result = yield* runScan({ claudeHomePath, codexHomePath });
 
-        expect(result.candidates).toEqual([]);
+        expect(withoutThreads(result.candidates)).toEqual([]);
       }),
     );
 
@@ -794,7 +822,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
 
         const result = yield* runScan({ claudeHomePath, codexHomePath });
 
-        expect(result.candidates).toEqual([]);
+        expect(withoutThreads(result.candidates)).toEqual([]);
       }),
     );
 
@@ -842,7 +870,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
 
         const result = yield* runScan({ claudeHomePath, codexHomePath });
 
-        expect(result.candidates).toEqual([]);
+        expect(withoutThreads(result.candidates)).toEqual([]);
       }),
     );
 
@@ -964,7 +992,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
         const fileSystem = yield* FileSystem.FileSystem;
 
         // worktreesDir derives as `<baseDir>/worktrees`, and the temp base
-        // dir contains no `.t3` segment — only the config-based prefix match
+        // dir contains no `.t3` segment â€” only the config-based prefix match
         // can exclude this one.
         const worktreeCwd = path.join(configBaseDir, "worktrees", "t3code", "wt-2");
         yield* fileSystem.makeDirectory(worktreeCwd, { recursive: true });
@@ -976,35 +1004,37 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
 
         const result = yield* runScan({ claudeHomePath, codexHomePath, configBaseDir });
 
-        expect(result.candidates).toEqual([]);
+        expect(withoutThreads(result.candidates)).toEqual([]);
       }),
     );
 
-    it.effect("excludes sandboxes reached through a symlink into the worktrees dir", () =>
-      Effect.gen(function* () {
-        const path = yield* Path.Path;
-        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
-        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
-        const configBaseDir = yield* makeTempDir("t3code-scanner-base-");
-        const linkParent = yield* makeTempDir("t3code-scanner-links-");
-        const fileSystem = yield* FileSystem.FileSystem;
+    it.effect.skipIf(!symlinksSupported)(
+      "excludes sandboxes reached through a symlink into the worktrees dir",
+      () =>
+        Effect.gen(function* () {
+          const path = yield* Path.Path;
+          const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+          const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+          const configBaseDir = yield* makeTempDir("t3code-scanner-base-");
+          const linkParent = yield* makeTempDir("t3code-scanner-links-");
+          const fileSystem = yield* FileSystem.FileSystem;
 
-        // The recorded cwd is a symlink whose own spelling looks harmless;
-        // only its realpath reveals the managed sandbox.
-        const worktreeCwd = path.join(configBaseDir, "worktrees", "t3code", "wt-3");
-        yield* fileSystem.makeDirectory(worktreeCwd, { recursive: true });
-        const symlinkCwd = path.join(linkParent, "innocent-project");
-        yield* fileSystem.symlink(worktreeCwd, symlinkCwd);
-        yield* writeTranscript({
-          filePath: path.join(claudeHomePath, "projects", "-slug", "a.jsonl"),
-          contents: claudeSessionLine(symlinkCwd),
-          mtimeMs: Date.parse("2026-01-01T00:00:00.000Z"),
-        });
+          // The recorded cwd is a symlink whose own spelling looks harmless;
+          // only its realpath reveals the managed sandbox.
+          const worktreeCwd = path.join(configBaseDir, "worktrees", "t3code", "wt-3");
+          yield* fileSystem.makeDirectory(worktreeCwd, { recursive: true });
+          const symlinkCwd = path.join(linkParent, "innocent-project");
+          yield* fileSystem.symlink(worktreeCwd, symlinkCwd);
+          yield* writeTranscript({
+            filePath: path.join(claudeHomePath, "projects", "-slug", "a.jsonl"),
+            contents: claudeSessionLine(symlinkCwd),
+            mtimeMs: Date.parse("2026-01-01T00:00:00.000Z"),
+          });
 
-        const result = yield* runScan({ claudeHomePath, codexHomePath, configBaseDir });
+          const result = yield* runScan({ claudeHomePath, codexHomePath, configBaseDir });
 
-        expect(result.candidates).toEqual([]);
-      }),
+          expect(withoutThreads(result.candidates)).toEqual([]);
+        }),
     );
 
     it.effect("finds the cwd on a later line when the first records carry none", () =>
@@ -1292,7 +1322,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
             Effect.provideService(FileSystem.FileSystem, observedFileSystem),
           );
           expect(reads).toBe(20_000);
-          expect(result.candidates).toEqual([]);
+          expect(withoutThreads(result.candidates)).toEqual([]);
           expect(result.truncated).toBe(count === 20_000 ? true : undefined);
         }),
     );
@@ -1323,7 +1353,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
 
         const result = yield* runScan({ claudeHomePath, codexHomePath });
 
-        expect(result.candidates).toEqual([
+        expect(withoutThreads(result.candidates)).toEqual([
           {
             path: workspace,
             title: path.basename(workspace),
@@ -1347,8 +1377,302 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
           codexHomePath: path.join(root, "no-codex"),
         });
 
-        expect(result.candidates).toEqual([]);
+        expect(withoutThreads(result.candidates)).toEqual([]);
         expect(result.scannedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+      }),
+    );
+  });
+
+  describe("cursor", () => {
+    const writeCursorChatMeta = (
+      path: Path.Path,
+      userHomePath: string,
+      agentId: string,
+      cwd: string,
+    ) =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const dir = path.join(userHomePath, ".cursor", "chats", "hash", agentId);
+        yield* fileSystem.makeDirectory(dir, { recursive: true });
+        yield* fileSystem.writeFileString(
+          path.join(dir, "meta.json"),
+          JSON.stringify({ schemaVersion: 1, title: "t", cwd }),
+        );
+      });
+
+    it.effect("skips Cursor transcripts without chats meta cwd", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+        const userHomePath = yield* makeTempDir("t3code-user-home-");
+        const sessionId = "157f4933-4f3e-4401-877d-00edc3e395a0";
+        yield* writeTranscript({
+          filePath: path.join(
+            userHomePath,
+            ".cursor",
+            "projects",
+            "1787694299267",
+            "agent-transcripts",
+            sessionId,
+            `${sessionId}.jsonl`,
+          ),
+          mtimeMs: Date.parse("2026-10-15T12:00:00.000Z"),
+          contents:
+            encodeTranscriptRecord({
+              role: "user",
+              message: { content: [{ type: "text", text: "No cwd known" }] },
+            }) + "\n",
+        });
+        const result = yield* runScan({
+          claudeHomePath,
+          codexHomePath,
+          userHomePath,
+          providerInstances: {
+            [ProviderInstanceId.make("cursor")]: {
+              driver: ProviderDriverKind.make("cursor"),
+              enabled: true,
+              config: {},
+            },
+          },
+        });
+        expect(result.candidates.filter((c) => c.sources.includes("cursor"))).toEqual([]);
+      }),
+    );
+    it.effect("never imports JSONL copies of SDK agents (T3-created ones included)", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+        const userHomePath = yield* makeTempDir("t3code-user-home-");
+        const workspace = yield* makeTempDir("t3code-cursor-workspace-");
+        const uuid = "33333333-3333-3333-3333-333333333333";
+        const agentId = `agent-${uuid}`;
+        const storeRoot = path.join(
+          userHomePath,
+          ".cursor",
+          "projects",
+          "p",
+          "sdk-agent-store",
+          "h",
+        );
+        NodeFS.mkdirSync(storeRoot, { recursive: true });
+        const index = new NodeSqlite.DatabaseSync(path.join(storeRoot, "index.db"));
+        index.exec(
+          "CREATE TABLE agents (agent_id TEXT, workspace_ref TEXT, name TEXT, metadata_json TEXT, latest_checkpoint_ref_json TEXT, created_at TEXT, updated_at TEXT)",
+        );
+        index
+          .prepare("INSERT INTO agents VALUES (?, ?, ?, '{}', '{}', '', '')")
+          .run(agentId, workspace, `T3 Code ${uuid}`);
+        index.close();
+        yield* writeTranscript({
+          filePath: path.join(
+            userHomePath,
+            ".cursor",
+            "projects",
+            cursorProjectSlug(workspace),
+            "agent-transcripts",
+            agentId,
+            `${agentId}.jsonl`,
+          ),
+          mtimeMs: Date.parse("2026-10-15T12:00:00.000Z"),
+          contents:
+            encodeTranscriptRecord({
+              role: "user",
+              message: { content: [{ type: "text", text: "from T3" }] },
+            }) + "\n",
+        });
+        const result = yield* runScan({
+          claudeHomePath,
+          codexHomePath,
+          userHomePath,
+          providerInstances: {
+            [ProviderInstanceId.make("cursor")]: {
+              driver: ProviderDriverKind.make("cursor"),
+              enabled: true,
+              config: {},
+            },
+          },
+        });
+        expect(result.candidates.filter((c) => c.sources.includes("cursor"))).toEqual([]);
+        expect((result.orphans ?? []).map((orphan) => orphan.providerSessionId)).not.toContain(
+          agentId,
+        );
+      }),
+    );
+    it.effect("binds one copy of a transcript duplicated into an empty-window folder", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+        const userHomePath = yield* makeTempDir("t3code-user-home-");
+        const workspace = yield* makeTempDir("t3code-cursor-workspace-");
+        const sessionId = "22222222-2222-2222-2222-222222222222";
+        // A chats meta for another agent proves the workspace folder; the
+        // transcript id itself is only found through the project slug.
+        yield* writeCursorChatMeta(path, userHomePath, "other-agent", workspace);
+        for (const folder of [cursorProjectSlug(workspace), "empty-window"]) {
+          yield* writeTranscript({
+            filePath: path.join(
+              userHomePath,
+              ".cursor",
+              "projects",
+              folder,
+              "agent-transcripts",
+              sessionId,
+              `${sessionId}.jsonl`,
+            ),
+            mtimeMs: Date.parse("2026-10-15T12:00:00.000Z"),
+            contents:
+              encodeTranscriptRecord({
+                role: "user",
+                message: { content: [{ type: "text", text: "hello" }] },
+              }) + "\n",
+          });
+        }
+        const result = yield* runScan({
+          claudeHomePath,
+          codexHomePath,
+          userHomePath,
+          providerInstances: {
+            [ProviderInstanceId.make("cursor")]: {
+              driver: ProviderDriverKind.make("cursor"),
+              enabled: true,
+              config: {},
+            },
+          },
+        });
+        const cursor = result.candidates.filter((c) => c.sources.includes("cursor"));
+        expect(cursor).toHaveLength(1);
+        expect(cursor[0]?.threadCount).toBe(1);
+        expect((result.orphans ?? []).map((orphan) => orphan.providerSessionId)).not.toContain(
+          sessionId,
+        );
+      }),
+    );
+    it.effect("discovers Cursor projects with cwd from ~/.cursor/chats meta.json", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+        const userHomePath = yield* makeTempDir("t3code-user-home-");
+        const workspace = yield* makeTempDir("t3code-cursor-workspace-");
+        const slug = "opaque-folder-name";
+        const sessionId = "agent-11111111-1111-1111-1111-111111111111";
+        yield* writeCursorChatMeta(path, userHomePath, sessionId, workspace);
+        yield* writeTranscript({
+          filePath: path.join(
+            userHomePath,
+            ".cursor",
+            "projects",
+            slug,
+            "agent-transcripts",
+            sessionId,
+            `${sessionId}.jsonl`,
+          ),
+          mtimeMs: Date.parse("2026-10-15T12:00:00.000Z"),
+          contents:
+            [
+              encodeTranscriptRecord({
+                role: "user",
+                message: { content: [{ type: "text", text: "Ship Cursor import" }] },
+              }),
+              encodeTranscriptRecord({
+                role: "assistant",
+                message: { content: [{ type: "text", text: "On it." }] },
+              }),
+            ].join("\n") + "\n",
+        });
+
+        const result = yield* runScan({
+          claudeHomePath,
+          codexHomePath,
+          userHomePath,
+          providerInstances: {
+            [ProviderInstanceId.make("cursor")]: {
+              driver: ProviderDriverKind.make("cursor"),
+              enabled: true,
+              config: {},
+            },
+          },
+        });
+
+        expect(withoutThreads(result.candidates)).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              path: workspace,
+              sources: ["cursor"],
+              threadCount: 1,
+            }),
+          ]),
+        );
+      }),
+    );
+
+    it.effect("imports recent Cursor agent-transcript threads for a workspace", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const nowMs = Date.parse("2026-10-15T18:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+        const userHomePath = yield* makeTempDir("t3code-user-home-");
+        const workspace = yield* makeTempDir("t3code-cursor-workspace-");
+        const slug = "opaque-folder-name";
+        const sessionId = "agent-22222222-2222-2222-2222-222222222222";
+        yield* writeCursorChatMeta(path, userHomePath, sessionId, workspace);
+        const cursorInstances = {
+          [ProviderInstanceId.make("cursor")]: {
+            driver: ProviderDriverKind.make("cursor"),
+            enabled: true,
+            config: {},
+          },
+        };
+        yield* writeTranscript({
+          filePath: path.join(
+            userHomePath,
+            ".cursor",
+            "projects",
+            slug,
+            "agent-transcripts",
+            sessionId,
+            `${sessionId}.jsonl`,
+          ),
+          mtimeMs: nowMs - 60_000,
+          contents:
+            [
+              encodeTranscriptRecord({
+                role: "user",
+                message: { content: [{ type: "text", text: "Import me" }] },
+              }),
+              encodeTranscriptRecord({
+                role: "assistant",
+                message: { content: [{ type: "text", text: "Imported." }] },
+              }),
+            ].join("\n") + "\n",
+        });
+
+        const outcomes = yield* runRecentThreadOutcomes({
+          claudeHomePath,
+          codexHomePath,
+          userHomePath,
+          workspaceRoot: workspace,
+          providerInstances: cursorInstances,
+        });
+        expect(outcomes.map((outcome) => outcome._tag)).toEqual(["Importable"]);
+        expect(
+          outcomes.flatMap((outcome) => (outcome._tag === "Importable" ? [outcome.thread] : [])),
+        ).toEqual([
+          expect.objectContaining({
+            source: "cursor",
+            providerSessionId: sessionId,
+            title: "Import me",
+            messages: [
+              expect.objectContaining({ role: "user", text: "Import me" }),
+              expect.objectContaining({ role: "assistant", text: "Imported." }),
+            ],
+          }),
+        ]);
       }),
     );
   });
@@ -2509,91 +2833,129 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
       }),
     );
 
-    it.effect("keeps a second account when the first has 5000 newer files", () =>
-      Effect.gen(function* () {
-        const path = yield* Path.Path;
-        const fileSystem = yield* FileSystem.FileSystem;
-        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
-        yield* TestClock.setTime(nowMs);
-        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
-        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
-        const oldWorkspace = yield* makeTempDir("t3code-workspace-old-");
-        const recentWorkspace = yield* makeTempDir("t3code-workspace-recent-");
-        const recentHome = yield* makeTempDir("t3code-claude-recent-home-");
-        const oldDirectory = path.join(claudeHomePath, "projects", "-aaa-old");
-        const oldTranscript = path.join(oldDirectory, "old.jsonl");
-        const recentDirectory = path.join(recentHome, "projects", "-zzz-recent");
+    it.effect(
+      "keeps a second account when the first fills its chat list limit",
+      () =>
+        Effect.gen(function* () {
+          const path = yield* Path.Path;
+          const fileSystem = yield* FileSystem.FileSystem;
+          const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+          yield* TestClock.setTime(nowMs);
+          const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+          const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+          const oldWorkspace = yield* makeTempDir("t3code-workspace-old-");
+          const recentWorkspace = yield* makeTempDir("t3code-workspace-recent-");
+          const recentHome = yield* makeTempDir("t3code-claude-recent-home-");
+          const oldDirectory = path.join(claudeHomePath, "projects", "-aaa-old");
+          const oldTranscript = path.join(oldDirectory, "old.jsonl");
+          const recentDirectory = path.join(recentHome, "projects", "-zzz-recent");
 
-        yield* writeTranscript({
-          filePath: oldTranscript,
-          contents: encodeTranscriptRecord({
-            type: "user",
-            cwd: oldWorkspace,
-            sessionId: "old-session",
-            message: { role: "user", content: "Old work" },
-          }),
-          mtimeMs: nowMs,
-        });
-        yield* writeTranscript({
-          filePath: path.join(recentDirectory, "recent.jsonl"),
-          contents: encodeTranscriptRecord({
-            type: "user",
-            cwd: recentWorkspace,
-            sessionId: "recent-session",
-            message: { role: "user", content: "Recent work" },
-          }),
-          mtimeMs: nowMs - 1_000,
-        });
+          yield* writeTranscript({
+            filePath: oldTranscript,
+            contents: encodeTranscriptRecord({
+              type: "user",
+              cwd: oldWorkspace,
+              sessionId: "old-session",
+              message: { role: "user", content: "Old work" },
+            }),
+            mtimeMs: nowMs,
+          });
+          yield* writeTranscript({
+            filePath: path.join(recentDirectory, "recent.jsonl"),
+            contents: encodeTranscriptRecord({
+              type: "user",
+              cwd: recentWorkspace,
+              sessionId: "recent-session",
+              message: { role: "user", content: "Recent work" },
+            }),
+            mtimeMs: nowMs - 1_000,
+          });
 
-        const simulatedOldTranscripts = Array.from(
-          { length: 5_000 },
-          (_, index) => `old-${index}.jsonl`,
-        );
-        const resolveTranscript = (filePath: string) =>
-          path.dirname(filePath) === oldDirectory && path.basename(filePath).startsWith("old-")
-            ? oldTranscript
-            : filePath;
-        const simulatedFileSystem = FileSystem.FileSystem.of({
-          ...fileSystem,
-          readDirectory: (directory, options) =>
-            directory === oldDirectory
-              ? Effect.succeed(simulatedOldTranscripts)
-              : fileSystem.readDirectory(directory, options),
-          stat: (filePath) => fileSystem.stat(resolveTranscript(filePath)),
-          open: (filePath, options) => fileSystem.open(resolveTranscript(filePath), options),
-        });
+          const simulatedOldTranscripts = Array.from(
+            { length: 20_000 }, // MAX_TRANSCRIPTS_PER_SOURCE
+            (_, index) => `old-${index}.jsonl`,
+          );
+          const resolveTranscript = (filePath: string) =>
+            path.dirname(filePath) === oldDirectory && path.basename(filePath).startsWith("old-")
+              ? oldTranscript
+              : filePath;
+          const simulatedFileSystem = FileSystem.FileSystem.of({
+            ...fileSystem,
+            readDirectory: (directory, options) =>
+              directory === oldDirectory
+                ? Effect.succeed(simulatedOldTranscripts)
+                : fileSystem.readDirectory(directory, options),
+            stat: (filePath) => fileSystem.stat(resolveTranscript(filePath)),
+            open: (filePath, options) => fileSystem.open(resolveTranscript(filePath), options),
+          });
 
-        const input = {
-          claudeHomePath,
-          codexHomePath,
-          providerInstances: {
-            [ProviderInstanceId.make("claude-work")]: {
-              driver: ProviderDriverKind.make("claudeAgent"),
-              config: { homePath: recentHome },
+          const input = {
+            claudeHomePath,
+            codexHomePath,
+            providerInstances: {
+              [ProviderInstanceId.make("claude-work")]: {
+                driver: ProviderDriverKind.make("claudeAgent"),
+                config: { homePath: recentHome },
+              },
             },
-          },
-        };
-        const threads = yield* Effect.gen(function* () {
-          const scanner = yield* AgentSessionScanner.AgentSessionScanner;
-          const scan = yield* scanner.scan;
-          expect(scan.truncated).toBe(true);
-          return yield* scanner.recentThreads(recentWorkspace).pipe(Stream.runCollect);
-        }).pipe(
-          Effect.provide(layerScannerTest(input)),
-          Effect.provideService(FileSystem.FileSystem, simulatedFileSystem),
-        );
+          };
+          const threads = yield* Effect.gen(function* () {
+            const scanner = yield* AgentSessionScanner.AgentSessionScanner;
+            const scan = yield* scanner.scan;
+            expect(scan.truncated).toBe(true);
+            return yield* scanner.recentThreads(recentWorkspace).pipe(Stream.runCollect);
+          }).pipe(
+            Effect.provide(layerScannerTest(input)),
+            Effect.provideService(FileSystem.FileSystem, simulatedFileSystem),
+          );
 
-        expect(
-          threads.flatMap((outcome) =>
-            outcome._tag === "Importable" ? [outcome.thread.providerSessionId] : [],
-          ),
-        ).toEqual(["recent-session"]);
-      }),
+          expect(
+            threads.flatMap((outcome) =>
+              outcome._tag === "Importable" ? [outcome.thread.providerSessionId] : [],
+            ),
+          ).toEqual(["recent-session"]);
+        }),
+      // 20,000 simulated transcripts: slow on a loaded Windows box.
+      300_000,
     );
   });
 });
 
 describe("parseAgentSessionTranscript", () => {
+  it("keeps Cursor agent-transcript user/assistant text", () => {
+    const thread = AgentSessionScanner.parseAgentSessionTranscript({
+      contents: [
+        encodeTranscriptRecord({
+          role: "user",
+          message: { content: [{ type: "text", text: "Fix the flaky test" }] },
+        }),
+        encodeTranscriptRecord({
+          role: "assistant",
+          message: {
+            content: [
+              { type: "text", text: "Looking into it." },
+              { type: "tool_use", name: "Shell", input: { command: "true" } },
+            ],
+          },
+        }),
+      ].join("\n"),
+      source: "cursor",
+      providerInstanceId: ProviderInstanceId.make("cursor"),
+      fallbackSessionId: "agent-aaaa-bbbb",
+      lastActiveAtMs: Date.parse("2026-10-15T12:00:00.000Z"),
+    });
+
+    expect(thread).toMatchObject({
+      source: "cursor",
+      providerSessionId: "agent-aaaa-bbbb",
+      title: "Fix the flaky test",
+      messages: [
+        { role: "user", text: "Fix the flaky test" },
+        { role: "assistant", text: "Looking into it." },
+      ],
+    });
+  });
+
   it.each([false, true])(
     "handles the exact record limit and an interior blank overflow=%s",
     (overflow) => {

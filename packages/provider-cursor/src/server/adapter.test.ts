@@ -800,70 +800,84 @@ describe("CursorAdapterV2", () => {
     );
   });
 
+  it("never asks the SDK for a local sandbox on Windows, where it has none", () => {
+    assert.deepEqual(
+      cursorRuntimeAgentPolicy(
+        { interactionMode: "default", cwd: "C:\\repo", runtimeMode: "approval-required" },
+        "win32",
+      ),
+      { autoReview: true, sandboxEnabled: false },
+    );
+  });
   it("maps runtime modes to the SDK sandbox and auto-review controls", () => {
     const base = {
       interactionMode: "default" as const,
       cwd: "/tmp/cursor-adapter",
     };
     assert.deepEqual(
-      cursorRuntimeAgentPolicy({
-        ...base,
-        runtimeMode: "full-access",
-      }),
+      cursorRuntimeAgentPolicy(
+        {
+          ...base,
+          runtimeMode: "full-access",
+        },
+        "linux",
+      ),
       {
         autoReview: false,
         sandboxEnabled: false,
       },
     );
     assert.deepEqual(
-      cursorRuntimeAgentPolicy({
-        ...base,
-        runtimeMode: "auto-accept-edits",
-      }),
+      cursorRuntimeAgentPolicy(
+        {
+          ...base,
+          runtimeMode: "auto-accept-edits",
+        },
+        "linux",
+      ),
       {
         autoReview: false,
         sandboxEnabled: true,
       },
     );
     assert.deepEqual(
-      cursorRuntimeAgentPolicy({
-        ...base,
-        runtimeMode: "auto",
-      }),
+      cursorRuntimeAgentPolicy(
+        {
+          ...base,
+          runtimeMode: "approval-required",
+        },
+        "linux",
+      ),
       {
         autoReview: true,
         sandboxEnabled: true,
       },
     );
     assert.deepEqual(
-      cursorRuntimeAgentPolicy({
-        ...base,
-        runtimeMode: "approval-required",
-      }),
-      {
-        autoReview: true,
-        sandboxEnabled: true,
-      },
-    );
-    assert.deepEqual(
-      cursorRuntimeAgentPolicy({
-        ...base,
-        runtimeMode: "full-access",
-        approvalPolicy: "never",
-        sandboxPolicy: { type: "readOnly" },
-      }),
+      cursorRuntimeAgentPolicy(
+        {
+          ...base,
+          runtimeMode: "full-access",
+          approvalPolicy: "never",
+          sandboxPolicy: { type: "readOnly" },
+        },
+        "linux",
+      ),
       {
         autoReview: false,
         sandboxEnabled: true,
       },
     );
     assert.deepEqual(
-      cursorRuntimeAgentPolicy({
-        ...base,
-        runtimeMode: "approval-required",
-        approvalPolicy: "never",
-        sandboxPolicy: { type: "dangerFullAccess" },
-      }),
+      cursorRuntimeAgentPolicy(
+        {
+          ...base,
+          runtimeMode: "approval-required",
+          approvalPolicy: "never",
+          sandboxPolicy: { type: "dangerFullAccess" },
+        },
+        "linux",
+      ),
       {
         autoReview: false,
         sandboxEnabled: false,

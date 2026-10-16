@@ -68,6 +68,7 @@ import {
 import { ComboboxItem, ComboboxTrigger } from "./ui/combobox";
 import { ComposerControl } from "./chat/ComposerControl";
 import { MiddleTruncate } from "./ui/middle-truncate";
+import { BranchName } from "./settings/BranchName";
 import { BranchPicker, BranchPickerRefItem } from "./BranchPicker";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 
@@ -792,7 +793,7 @@ export function BranchToolbarBranchSelector({
               )}
             />
             <ComposerContextLabel displayMode={displayMode}>
-              <MiddleTruncate
+              <BranchName
                 value={triggerLabel}
                 variant={displayMode === "panel" ? "cap-aligned" : "default"}
                 className="w-full"

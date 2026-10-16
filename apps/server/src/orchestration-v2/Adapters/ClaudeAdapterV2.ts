@@ -16,6 +16,8 @@ import {
 
 import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
 import { normalizeClaudeTurnTokenUsage } from "../../provider/ClaudeTurnTokenUsage.ts";
+import * as UsagePolicyService from "../../usage/UsagePolicyService.ts";
+import { emptyTokenCounts } from "@t3tools/shared/usagePolicies";
 import {
   type CanUseTool,
   forkSession as forkClaudeSession,
@@ -6108,6 +6110,41 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                     input.context.steeredSegmentUsage,
                   ),
                 },
+              }),
+              Effect.gen(function* () {
+                const turnTokenUsage = normalizeClaudeTurnTokenUsage(
+                  input.result,
+                  input.context.subagentsByTaskId.size > 0 ||
+                    input.context.subagentsByToolUseId.size > 0,
+                  input.status,
+                  input.context.steeredSegmentUsage,
+                );
+                if (
+                  turnTokenUsage.usageStatus === "unavailable" ||
+                  turnTokenUsage.inputTokens === undefined
+                ) {
+                  return;
+                }
+                const usagePolicy = yield* Effect.serviceOption(
+                  UsagePolicyService.UsagePolicyService,
+                );
+                if (Option.isNone(usagePolicy)) return;
+                const delta = {
+                  ...emptyTokenCounts(),
+                  inputTokens: turnTokenUsage.inputTokens,
+                  cachedInputTokens: turnTokenUsage.cachedInputTokens ?? 0,
+                  cacheCreationTokens: turnTokenUsage.cacheCreationTokens ?? 0,
+                  outputTokens: turnTokenUsage.outputTokens ?? 0,
+                  reasoningTokens: turnTokenUsage.reasoningTokens ?? 0,
+                };
+                yield* usagePolicy.value
+                  .record({
+                    instanceId: adapterOptions.instanceId,
+                    driverKind: CLAUDE_PROVIDER,
+                    model: input.context.input.modelSelection.model,
+                    delta,
+                  })
+                  .pipe(Effect.catch(() => Effect.void));
               }),
               // Surface this native thread's roster before the root turn
               // terminals so writeFinalRunEvents preserves it. Failed or

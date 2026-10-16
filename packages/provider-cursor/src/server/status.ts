@@ -22,6 +22,8 @@ import {
   type ServerProviderDraft,
 } from "@t3tools/provider-core/server/snapshotProbe";
 import * as CursorSdkCatalog from "./CursorSdkCatalog.ts";
+import { cursorRunsOnDescriptor } from "./runsOn.ts";
+import { describeCursorExistingLogin, type CursorExistingLogin } from "./existingLogin.ts";
 
 const CURSOR_PRESENTATION = {
   displayName: "Cursor",
@@ -159,6 +161,7 @@ export function buildCursorCapabilitiesFromSdkModel(model: SDKModel): ModelCapab
     );
   }
 
+  optionDescriptors.push(cursorRunsOnDescriptor());
   return createModelCapabilities({ optionDescriptors });
 }
 
@@ -250,22 +253,33 @@ export const checkCursorProviderStatus = Effect.fn("checkCursorProviderStatus")(
   cursorSettings: CursorSettings,
   environment?: NodeJS.ProcessEnv,
   authenticationType: "api-key" | "browser" = "api-key",
+  existingLogin?: CursorExistingLogin,
 ): Effect.fn.Return<ServerProviderDraft, never, CursorSdkCatalog.CursorSdkCatalog> {
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
   const fallbackModels = getCursorFallbackModels(cursorSettings);
 
   if (!cursorSettings.enabled) {
+    const existing = existingLogin ?? ({ kind: "none" as const } satisfies CursorExistingLogin);
+    const described = describeCursorExistingLogin(existing);
     return buildServerProvider({
       presentation: CURSOR_PRESENTATION,
       enabled: false,
       checkedAt,
       models: fallbackModels,
       probe: {
-        installed: false,
+        installed: existing.kind !== "none",
         version: null,
         status: "warning",
-        auth: { status: "unknown" },
-        message: "Cursor is disabled in T3 Code settings.",
+        auth:
+          existing.kind === "sdk"
+            ? {
+                status: "authenticated",
+                type: "browser",
+                label: "Cursor account",
+                ...(described.authEmail ? { email: described.authEmail } : {}),
+              }
+            : { status: "unknown" },
+        message: described.message,
       },
     });
   }

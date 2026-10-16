@@ -9,6 +9,7 @@ import type {
   ToolCall,
 } from "@cursor/sdk";
 import { formatReadToolLabel, formatSearchToolLabel } from "@t3tools/shared/toolActivity";
+import { emptyTokenCounts } from "@t3tools/shared/usagePolicies";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import {
   isOrchestrationV2WorkActive,
@@ -24,6 +25,8 @@ import {
   type OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderTurn,
+  type OrchestrationV2RuntimeRequest,
+  type ProviderApprovalDecision,
   type OrchestrationV2Subagent,
   type OrchestrationV2TurnItem,
   type ProviderInstanceId,
@@ -47,6 +50,9 @@ import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderS
 import * as McpProviderSession from "@t3tools/provider-core/server/mcpSession";
 import { CursorTransportFailure } from "./transportFailure.ts";
 import { cursorSdkModelSelection } from "./sdkModel.ts";
+import { cursorRunsOn, cursorWorkerRoot, gitRepoTarget, isCloudAgentId } from "./runsOn.ts";
+import { runningWorkerName } from "./CursorMachine.ts";
+import { labeledAgentName } from "./CursorAgentDirectory.ts";
 import {
   discoverCursorSkills,
   hasCursorSkillMention,
@@ -74,6 +80,13 @@ import {
   subagentThreadTitle,
 } from "@t3tools/provider-core/server/subagentProjection";
 import * as CursorAgentSdk from "./CursorAgentSdk.ts";
+import {
+  sharedCursorHookBridge,
+  type CursorApprovalDecision,
+  type CursorApprovalQuestion,
+  type CursorHookBridge,
+} from "./CursorHookBridge.ts";
+import { installApprovalHooks, uninstallApprovalHooks } from "./CursorApprovalHooks.ts";
 export { cursorSdkModelSelection } from "./sdkModel.ts";
 
 export const CURSOR_DRIVER_KIND = CursorAgentSdk.CURSOR_PROVIDER;
@@ -102,7 +115,7 @@ export const CursorProviderCapabilitiesV2 = {
     emitsTurnStarted: true,
     emitsTurnCompleted: true,
     supportsInterrupt: true,
-    supportsActiveSteering: false,
+    supportsActiveSteering: true,
     supportsSteeringByInterruptRestart: true,
     supportsQueuedMessages: true,
     terminalStatusQuality: "strong",
@@ -181,6 +194,7 @@ export interface CursorRuntimeAgentPolicy {
 
 export function cursorRuntimeAgentPolicy(
   runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
+  platform: NodeJS.Platform = process.platform,
 ): CursorRuntimeAgentPolicy {
   const sandboxPolicyType =
     typeof runtimePolicy.sandboxPolicy === "object" &&
@@ -194,10 +208,13 @@ export function cursorRuntimeAgentPolicy(
       runtimePolicy.approvalPolicy === undefined
         ? runtimePolicy.runtimeMode === "approval-required" || runtimePolicy.runtimeMode === "auto"
         : runtimePolicy.approvalPolicy !== "never",
+    // The Cursor SDK has no local sandbox on Windows and rejects runs that ask for one.
     sandboxEnabled:
-      runtimePolicy.sandboxPolicy === undefined
-        ? runtimePolicy.runtimeMode !== "full-access"
-        : sandboxPolicyType !== "dangerFullAccess",
+      platform === "win32"
+        ? false
+        : runtimePolicy.sandboxPolicy === undefined
+          ? runtimePolicy.runtimeMode !== "full-access"
+          : sandboxPolicyType !== "dangerFullAccess",
   };
 }
 
@@ -302,14 +319,66 @@ const CURSOR_AGENT_SETTING_SOURCES = [
   "plugins",
 ] as const satisfies ReadonlyArray<SettingSource>;
 
+/**
+ * Where the agent is opened. `local` runs inside T3; `remote` creates a Cloud
+ * Agent on this account's worker or in Cursor Cloud; `remote-resume` reopens an
+ * existing one (its environment is fixed at creation).
+ */
+export type CursorAgentTarget =
+  | { readonly kind: "local" }
+  | { readonly kind: "remote-resume" }
+  | {
+      readonly kind: "remote";
+      readonly runsOn: "worker" | "cloud";
+      readonly workerName?: string;
+      readonly repoUrl: string;
+      readonly startingRef?: string;
+      readonly instanceId: string;
+    };
+
 export function makeCursorAgentOptions(input: {
   readonly apiKey?: string;
   readonly modelSelection: ModelSelection;
   readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
   readonly threadId: ThreadId;
   readonly mcpSession: McpProviderSession.McpProviderSessionConfig | undefined;
+  readonly target?: CursorAgentTarget;
 }): AgentOptions {
   const policy = cursorRuntimeAgentPolicy(input.runtimePolicy);
+  const target = input.target ?? { kind: "local" };
+  if (target.kind !== "local") {
+    // Remote agents run their own checkout: no local cwd, sandbox or loopback MCP.
+    const base = {
+      model: cursorSdkModelSelection(input.modelSelection),
+      ...(input.apiKey === undefined ? {} : { apiKey: input.apiKey }),
+    };
+    if (target.kind === "remote-resume") return base;
+    return {
+      ...base,
+      name: labeledAgentName(
+        target.runsOn === "worker" ? "self-hosted-machine" : "cloud",
+        `T3 Code ${input.threadId}`,
+      ),
+      cloud: {
+        env:
+          target.runsOn === "worker" && target.workerName !== undefined
+            ? { type: "machine", name: target.workerName }
+            : { type: "cloud" },
+        repos: [
+          {
+            url: target.repoUrl,
+            ...(target.startingRef === undefined ? {} : { startingRef: target.startingRef }),
+          },
+        ],
+        metadata: {
+          createdBy: "t3code",
+          t3Runtime: target.runsOn,
+          t3Account: target.instanceId,
+          t3Thread: input.threadId,
+        },
+      },
+    };
+  }
   const mcpServers = cursorMcpServers(input.mcpSession);
   return {
     model: cursorSdkModelSelection(input.modelSelection),
@@ -839,6 +908,8 @@ interface ActiveCursorTurn {
   readonly reasoning: ActiveCursorTextStream;
   interrupted: boolean;
   finalized: boolean;
+  /** True after a real SDK usage report was recorded for this turn. */
+  usageRecorded: boolean;
 }
 
 interface CursorLiveAgent {
@@ -850,7 +921,30 @@ export interface CursorAdapterV2Options {
   readonly instanceId: ProviderInstanceId;
   readonly settings: CursorSettings;
   readonly environment: NodeJS.ProcessEnv;
+  /** T3's state folder; this instance's worker lives in `cursor-workers/<instanceId>`. */
+  readonly stateDir?: string;
+  /** Loopback bridge for T3's Cursor approval hooks; set when `approvalHooks` is on. */
+  readonly hookBridge?: CursorHookBridge;
 }
+
+interface PendingCursorApproval {
+  readonly decision: Deferred.Deferred<ProviderApprovalDecision>;
+  readonly runtimeRequest: OrchestrationV2RuntimeRequest;
+  readonly node: OrchestrationV2ExecutionNode;
+  readonly turnItem: OrchestrationV2TurnItem;
+}
+
+/** Whether a turn's runtime policy wants a person to approve actions. */
+export function cursorPolicyRequiresApproval(
+  runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
+): boolean {
+  return cursorRuntimeAgentPolicy(runtimePolicy).autoReview;
+}
+
+export const cursorHookDecisionOf = (decision: ProviderApprovalDecision): CursorApprovalDecision =>
+  decision === "accept" || decision === "acceptForSession" || decision === "acceptAlways"
+    ? "allow"
+    : "deny";
 
 export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
   options: CursorAdapterV2Options,
@@ -867,7 +961,12 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
   return ProviderAdapter.ProviderAdapterV2.of({
     instanceId: adapterOptions.instanceId,
     driver: CursorAgentSdk.CURSOR_PROVIDER,
-    getCapabilities: () => Effect.succeed(CursorProviderCapabilitiesV2),
+    getCapabilities: () =>
+      Effect.succeed(
+        cursorProviderCapabilitiesV2(
+          adapterOptions.hookBridge !== undefined && adapterOptions.settings.approvalHooks,
+        ),
+      ),
     planSelectionTransition: () => Effect.succeed(turnScopedSelectionTransition()),
     openSession: Effect.fn("CursorAdapterV2.openSession")(
       function* (input: ProviderAdapter.ProviderAdapterV2OpenSessionInput) {
@@ -882,6 +981,8 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
         });
         const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
         const liveAgent = yield* Ref.make<CursorLiveAgent | null>(null);
+        // Plain mirror of the live agent id for the hook bridge's sync routing.
+        let liveAgentId: string | undefined;
         const activeTurn = yield* Ref.make<ActiveCursorTurn | null>(null);
         const planIds = yield* Ref.make(new Map<string, OrchestrationV2PlanArtifact["id"]>());
 
@@ -898,6 +999,171 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
             context.itemOrdinals.set(nativeItemId, ordinal);
             return ordinal;
           });
+
+        const pendingApprovals = new Map<string, PendingCursorApproval>();
+        // Approved for the rest of this session ("acceptForSession"/"acceptAlways").
+        const sessionApproved = new Set<string>();
+        let hookRequestCounter = 0;
+
+        const resolveApproval = Effect.fnUntraced(function* (
+          requestId: string,
+          decision: ProviderApprovalDecision,
+          status: "resolved" | "cancelled",
+        ) {
+          const pending = pendingApprovals.get(requestId);
+          if (pending === undefined) return false;
+          pendingApprovals.delete(requestId);
+          const now = yield* DateTime.now;
+          yield* emitProviderEvent({
+            type: "runtime_request.updated",
+            driver: CursorAgentSdk.CURSOR_PROVIDER,
+            threadId: pending.node.threadId,
+            runtimeRequest: { ...pending.runtimeRequest, status, resolvedAt: now, decision },
+          });
+          yield* emitProviderEvent({
+            type: "node.updated",
+            driver: CursorAgentSdk.CURSOR_PROVIDER,
+            node: { ...pending.node, status: "completed", completedAt: now },
+          });
+          yield* emitProviderEvent({
+            type: "turn_item.updated",
+            driver: CursorAgentSdk.CURSOR_PROVIDER,
+            turnItem: {
+              ...pending.turnItem,
+              status: "completed",
+              completedAt: now,
+              updatedAt: now,
+            },
+          });
+          yield* Deferred.succeed(pending.decision, decision);
+          return true;
+        });
+
+        /** Asks the T3 user about one Cursor hook and waits for the answer. */
+        const decideHook = Effect.fnUntraced(function* (question: CursorApprovalQuestion) {
+          const context = yield* Ref.get(activeTurn);
+          if (context === null) {
+            return "deny" as const;
+          }
+          if (!cursorPolicyRequiresApproval(context.input.runtimePolicy)) {
+            return "allow" as const;
+          }
+          const approvalKey = `${question.kind}:${question.detail}`;
+          if (sessionApproved.has(approvalKey)) {
+            return "allow" as const;
+          }
+          const nativeRequestId = `hook:${question.event}:${++hookRequestCounter}`;
+          const requestId = yield* idAllocator.allocate.runtimeRequest({
+            driver: CursorAgentSdk.CURSOR_PROVIDER,
+            providerTurnId: context.providerTurnId,
+            nativeRequestId,
+          });
+          const now = yield* DateTime.now;
+          const nodeId = idAllocator.derive.approvalNode({ requestId });
+          const nativeItemRef = {
+            driver: CursorAgentSdk.CURSOR_PROVIDER,
+            nativeId: nativeRequestId,
+            strength: "weak" as const,
+          };
+          const ordinal = yield* resolveItemOrdinal(context, `approval:${nativeRequestId}`);
+          const runtimeRequest: OrchestrationV2RuntimeRequest = {
+            id: requestId,
+            nodeId,
+            providerTurnId: context.providerTurnId,
+            nativeRequestRef: nativeItemRef,
+            kind: question.kind,
+            status: "pending",
+            responseCapability: { type: "live", providerSessionId: input.providerSessionId },
+            createdAt: now,
+            resolvedAt: null,
+          };
+          const node: OrchestrationV2ExecutionNode = {
+            id: nodeId,
+            threadId: context.input.threadId,
+            runId: context.input.runId,
+            parentNodeId: context.input.rootNodeId,
+            rootNodeId: context.input.rootNodeId,
+            kind: "approval_request",
+            status: "waiting",
+            countsForRun: false,
+            providerThreadId: context.input.providerThread.id,
+            providerTurnId: context.providerTurnId,
+            nativeItemRef,
+            runtimeRequestId: requestId,
+            checkpointScopeId: null,
+            startedAt: now,
+            completedAt: null,
+          };
+          const turnItem: OrchestrationV2TurnItem = {
+            id: idAllocator.derive.approvalTurnItem({ requestId }),
+            threadId: context.input.threadId,
+            runId: context.input.runId,
+            nodeId,
+            providerThreadId: context.input.providerThread.id,
+            providerTurnId: context.providerTurnId,
+            nativeItemRef,
+            parentItemId: null,
+            ordinal,
+            status: "waiting",
+            title: question.title,
+            startedAt: now,
+            completedAt: null,
+            updatedAt: now,
+            type: "approval_request",
+            requestId,
+            requestKind: question.kind,
+            prompt:
+              question.detail === "" ? question.title : `${question.title}: ${question.detail}`,
+          };
+          const decision = yield* Deferred.make<ProviderApprovalDecision>();
+          pendingApprovals.set(String(requestId), { decision, runtimeRequest, node, turnItem });
+          yield* emitProviderEvent({
+            type: "node.updated",
+            driver: CursorAgentSdk.CURSOR_PROVIDER,
+            node,
+          });
+          yield* emitProviderEvent({
+            type: "runtime_request.updated",
+            driver: CursorAgentSdk.CURSOR_PROVIDER,
+            threadId: context.input.threadId,
+            runtimeRequest,
+          });
+          yield* emitProviderEvent({
+            type: "turn_item.updated",
+            driver: CursorAgentSdk.CURSOR_PROVIDER,
+            turnItem,
+          });
+          // A turn that ends or is interrupted while waiting cancels the request.
+          const answered = yield* Effect.raceFirst(
+            Deferred.await(decision),
+            Deferred.await(context.completed).pipe(
+              Effect.flatMap(() => resolveApproval(String(requestId), "cancel", "cancelled")),
+              Effect.as("cancel" as const),
+            ),
+          );
+          if (answered === "acceptForSession" || answered === "acceptAlways") {
+            sessionApproved.add(approvalKey);
+          }
+          return cursorHookDecisionOf(answered);
+        });
+
+        if (adapterOptions.hookBridge !== undefined && adapterOptions.settings.approvalHooks) {
+          const bridge = adapterOptions.hookBridge;
+          const services = yield* Effect.context();
+          const unregister = bridge.register({
+            agentId: () => liveAgentId,
+            cwd: input.runtimePolicy.cwd,
+            decide: (question) => Effect.runPromiseWith(services)(decideHook(question)),
+          });
+          yield* Effect.addFinalizer(() =>
+            Effect.gen(function* () {
+              unregister();
+              for (const requestId of Array.from(pendingApprovals.keys())) {
+                yield* resolveApproval(requestId, "cancel", "cancelled");
+              }
+            }),
+          );
+        }
 
         const resolvePlanId = Effect.fnUntraced(function* (
           context: ActiveCursorTurn,
@@ -1875,6 +2141,41 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
           return candidates.filter((value): value is string => typeof value === "string").join("");
         };
 
+        type CursorTurnUsageReport = {
+          readonly inputTokens: number;
+          readonly outputTokens: number;
+          readonly cacheReadTokens: number;
+          readonly cacheWriteTokens: number;
+          readonly reasoningTokens?: number | undefined;
+        };
+
+        const cursorTokenUsageToDelta = (usage: CursorTurnUsageReport) => ({
+          ...emptyTokenCounts(),
+          inputTokens: Math.max(0, usage.inputTokens),
+          cachedInputTokens: Math.max(0, usage.cacheReadTokens),
+          cacheCreationTokens: Math.max(0, usage.cacheWriteTokens),
+          outputTokens: Math.max(0, usage.outputTokens),
+          reasoningTokens: Math.max(0, usage.reasoningTokens ?? 0),
+        });
+
+        const recordTurnUsage = Effect.fnUntraced(function* (
+          context: ActiveCursorTurn,
+          usage: CursorTurnUsageReport | undefined,
+        ) {
+          if (usage === undefined || context.usageRecorded) return;
+          const total = Math.max(0, usage.inputTokens) + Math.max(0, usage.outputTokens);
+          if (total <= 0) return;
+          context.usageRecorded = true;
+          yield* host
+            .recordUsagePolicy({
+              instanceId: adapterOptions.instanceId,
+              driverKind: CursorAgentSdk.CURSOR_PROVIDER,
+              model: context.input.modelSelection.model,
+              delta: cursorTokenUsageToDelta(usage),
+            })
+            .pipe(Effect.catch(() => Effect.void));
+        });
+
         const handleInteractionUpdate = Effect.fnUntraced(function* (
           context: ActiveCursorTurn,
           update: InteractionUpdate,
@@ -1915,9 +2216,13 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
               yield* handleToolUpdate(context, update);
               return;
             case "step-completed":
+              yield* completeAssistant(context);
+              yield* completeReasoning(context);
+              return;
             case "turn-ended":
               yield* completeAssistant(context);
               yield* completeReasoning(context);
+              yield* recordTurnUsage(context, update.usage);
               return;
             case "shell-output-delta": {
               const shell = Array.from(context.tools.values())
@@ -2087,6 +2392,61 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
           }
         };
 
+        // An existing agent stays where it was created; "Runs on" applies to new ones.
+        const resolveAgentTarget = (openInput: {
+          readonly operation: "create" | "resume";
+          readonly modelSelection: ModelSelection;
+          readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
+          readonly agentId?: string;
+        }): Effect.Effect<CursorAgentTarget, ProviderAdapter.ProviderAdapterProtocolError> => {
+          if (openInput.agentId !== undefined && isCloudAgentId(openInput.agentId)) {
+            return Effect.succeed({ kind: "remote-resume" });
+          }
+          const runsOn = cursorRunsOn(openInput.modelSelection);
+          if (openInput.operation === "resume" || runsOn === "local") {
+            return Effect.succeed({ kind: "local" });
+          }
+          const cwd = openInput.runtimePolicy.cwd;
+          return Effect.tryPromise({
+            try: async (): Promise<CursorAgentTarget> => {
+              if (cwd === null) {
+                throw new Error(
+                  "Pick a project first: a worker or cloud agent needs its git repo.",
+                );
+              }
+              const repo = await gitRepoTarget(cwd);
+              if (runsOn === "cloud") {
+                return { kind: "remote", runsOn, instanceId: adapterOptions.instanceId, ...repo };
+              }
+              const workerName =
+                adapterOptions.stateDir === undefined
+                  ? undefined
+                  : await runningWorkerName(
+                      cursorWorkerRoot(adapterOptions.stateDir, adapterOptions.instanceId),
+                      process.platform as Parameters<typeof runningWorkerName>[1],
+                      adapterOptions.environment,
+                    );
+              if (workerName === undefined) {
+                throw new Error(
+                  "No worker is running for this account. Start it on the Cursor agents page first",
+                );
+              }
+              return {
+                kind: "remote",
+                runsOn,
+                workerName,
+                instanceId: adapterOptions.instanceId,
+                ...repo,
+              };
+            },
+            catch: (cause) =>
+              new ProviderAdapter.ProviderAdapterProtocolError({
+                driver: CursorAgentSdk.CURSOR_PROVIDER,
+                detail: cause instanceof Error ? cause.message : String(cause),
+              }),
+          });
+        };
+
         const openAgent = Effect.fnUntraced(function* (openInput: {
           readonly operation: "create" | "resume";
           readonly threadId: ThreadId;
@@ -2106,6 +2466,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
             yield* existing.session.close.pipe(Effect.ignore);
             yield* Ref.set(liveAgent, null);
           }
+          const target = yield* resolveAgentTarget(openInput);
           const sdkSession = yield* runner.open({
             operation: openInput.operation,
             ...(openInput.agentId === undefined ? {} : { agentId: openInput.agentId }),
@@ -2115,6 +2476,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
               runtimePolicy: openInput.runtimePolicy,
               threadId: openInput.threadId,
               mcpSession: yield* mcpSessions.read(openInput.threadId),
+              target,
             }),
             threadId: openInput.threadId,
             providerSessionId: input.providerSessionId,
@@ -2124,6 +2486,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
             session: sdkSession,
           } satisfies CursorLiveAgent;
           yield* Ref.set(liveAgent, next);
+          liveAgentId = next.nativeThreadId;
           return next;
         });
 
@@ -2268,6 +2631,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
               },
               interrupted: false,
               finalized: false,
+              usageRecorded: false,
             };
             yield* Ref.set(activeTurn, context);
             yield* emitProviderEvent({
@@ -2311,6 +2675,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
                     });
                   }
                   if (context !== null) {
+                    yield* recordTurnUsage(context, result.usage);
                     const transportFailure = context.assistantReply.failure;
                     const status =
                       transportFailure === undefined ? terminalStatus(context, result) : "failed";
@@ -2322,6 +2687,15 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
                             failure: makeProviderFailure({
                               cause:
                                 transportFailure ?? (result as { readonly error?: unknown }).error,
+                              // Cursor's own run error is user-facing; show it instead of the
+                              // generic text, and say so when Cursor gave no reason at all.
+                              ...(transportFailure === undefined
+                                ? {
+                                    message:
+                                      result.error?.message ??
+                                      `Cursor ended run ${result.id} with an error and gave no reason. Check the agent in Cursor (worker or cloud logs).`,
+                                  }
+                                : {}),
                               class:
                                 transportFailure === undefined
                                   ? "provider_error"
@@ -2462,13 +2836,33 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
               ...turnInput,
               message: { ...turnInput.message, text: "/compress" },
             }),
-          steerTurn: (turnInput) =>
-            Effect.fail(
-              new ProviderAdapter.ProviderAdapterSteerRunUnsupportedError({
-                driver: CursorAgentSdk.CURSOR_PROVIDER,
-                providerThreadId: turnInput.providerThread.id,
-              }),
-            ),
+          steerTurn: Effect.fn("CursorAdapterV2.steerTurn")(function* (
+            turnInput: ProviderAdapter.ProviderAdapterV2SteerInput,
+          ) {
+            const unsupported = new ProviderAdapter.ProviderAdapterSteerRunUnsupportedError({
+              driver: CursorAgentSdk.CURSOR_PROVIDER,
+              providerThreadId: turnInput.providerThread.id,
+            });
+            const context = yield* Ref.get(activeTurn);
+            // Steer only into the live turn the caller means, and only with
+            // text: Run.steer takes no attachments. Everything else falls back
+            // to the orchestrator's interrupt-and-restart steering.
+            if (
+              context === null ||
+              context.providerTurnId !== turnInput.providerTurnId ||
+              context.run.steer === undefined ||
+              turnInput.message.attachments.length > 0 ||
+              turnInput.message.text.trim().length === 0
+            ) {
+              return yield* unsupported;
+            }
+            const outcome = yield* context.run
+              .steer(turnInput.message.text)
+              .pipe(Effect.orElseSucceed(() => "revert_to_followup" as const));
+            if (outcome !== "complete_delivered") {
+              return yield* unsupported;
+            }
+          }),
           interruptTurn: Effect.fn("CursorAdapterV2.interruptTurn")(
             function* (turnInput: ProviderAdapter.ProviderAdapterV2InterruptInput) {
               const context = yield* Ref.get(activeTurn);
@@ -2510,15 +2904,26 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
               ),
           ),
           respondToRuntimeRequest: (requestInput) =>
-            Effect.fail(
-              new ProviderAdapter.ProviderAdapterRuntimeRequestResponseError({
-                driver: CursorAgentSdk.CURSOR_PROVIDER,
-                requestId: requestInput.requestId,
-                cause: new ProviderAdapter.ProviderAdapterProtocolError({
-                  driver: CursorAgentSdk.CURSOR_PROVIDER,
-                  detail: "Cursor Agent SDK does not expose interactive approval requests.",
-                }),
-              }),
+            resolveApproval(
+              String(requestInput.requestId),
+              requestInput.decision ?? "decline",
+              "resolved",
+            ).pipe(
+              Effect.flatMap((found) =>
+                found
+                  ? Effect.void
+                  : Effect.fail(
+                      new ProviderAdapter.ProviderAdapterRuntimeRequestResponseError({
+                        driver: CursorAgentSdk.CURSOR_PROVIDER,
+                        requestId: requestInput.requestId,
+                        cause: new ProviderAdapter.ProviderAdapterProtocolError({
+                          driver: CursorAgentSdk.CURSOR_PROVIDER,
+                          detail:
+                            "No pending Cursor approval for this request. Approvals need the T3 Cursor approval hooks (Settings → Cursor → approval hooks).",
+                        }),
+                      }),
+                    ),
+              ),
             ),
           readThreadSnapshot: Effect.fn("CursorAdapterV2.readThreadSnapshot")(
             function* (snapshotInput) {
@@ -2631,6 +3036,9 @@ export type CursorAdapterV2DriverEnv =
   | McpProviderSessions.McpProviderSessions
   | ProviderHost.ProviderHost;
 
+/** Which Cursor instances currently have approval hooks on (they share one hooks.json). */
+const approvalHookInstances = new Map<string, boolean>();
+
 export const CursorAdapterV2Driver: ProviderAdapterDriver<
   CursorSettings,
   CursorAdapterV2DriverEnv
@@ -2641,7 +3049,40 @@ export const CursorAdapterV2Driver: ProviderAdapterDriver<
   create: Effect.fn("CursorAdapterV2Driver.create")(
     function* (input: ProviderAdapterDriverCreateInput<CursorSettings>) {
       const hostEnvironment = yield* HostProcess.Environment;
+      // Windows has no HOME; Cursor reads user hooks from %USERPROFILE%\.cursor there.
+      const home =
+        hostEnvironment.HOME ??
+        hostEnvironment.USERPROFILE ??
+        process.env.HOME ??
+        process.env.USERPROFILE;
+      approvalHookInstances.set(input.instanceId, input.config.approvalHooks);
+      const hookBridge = input.config.approvalHooks
+        ? yield* Effect.tryPromise(async () => {
+            const bridge = await sharedCursorHookBridge();
+            if (home !== undefined) {
+              await installApprovalHooks({ cursorDir: `${home}/.cursor` });
+            }
+            return bridge;
+          })
+        : undefined;
+      // The user-level hooks file is shared: take T3's entry out once no account uses it.
+      if (
+        !input.config.approvalHooks &&
+        home !== undefined &&
+        ![...approvalHookInstances.values()].some(Boolean)
+      ) {
+        yield* Effect.tryPromise(() =>
+          uninstallApprovalHooks({ cursorDir: `${home}/.cursor` }),
+        ).pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning("cursor approval hooks cleanup failed", { cause }),
+          ),
+        );
+      }
+      const host = yield* ProviderHost.ProviderHost;
       return yield* makeCursorAdapterV2({
+        ...(hookBridge === undefined ? {} : { hookBridge }),
+        stateDir: host.paths.stateDir,
         instanceId: input.instanceId,
         settings: {
           ...input.config,
@@ -2664,3 +3105,22 @@ export const CursorAdapterV2Driver: ProviderAdapterDriver<
       ),
   ),
 };
+
+/**
+ * Capabilities with T3's Cursor approval hooks active: shell commands, MCP
+ * calls and file edits stop for a T3 decision (see CursorHookBridge).
+ */
+export function cursorProviderCapabilitiesV2(
+  approvalHooks: boolean,
+): OrchestrationV2ProviderCapabilities {
+  if (!approvalHooks) return CursorProviderCapabilitiesV2;
+  return {
+    ...CursorProviderCapabilitiesV2,
+    approvals: {
+      ...CursorProviderCapabilitiesV2.approvals,
+      supportsCommandApproval: true,
+      supportsFileChangeApproval: true,
+      approvalCallbacksAreLiveOnly: true,
+    },
+  };
+}

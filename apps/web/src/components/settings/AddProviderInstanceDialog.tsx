@@ -49,6 +49,8 @@ import {
   type WizardNavigation,
 } from "./AddProviderInstanceDialog.logic";
 import { AddProviderInstanceWizardSteps } from "./AddProviderInstanceWizardSteps";
+import { PairedProviderInstanceSuggestions } from "./PairedProviderInstanceSuggestions";
+import type { PairedProviderInstanceSuggestion } from "./pairedProviderInstances.logic";
 import { AcpRegistrySearchStep } from "./AcpRegistrySearchStep";
 import { ProviderWizardAuthenticationStep } from "./ProviderWizardAuthenticationStep";
 import { resolveOfficialAcpRegistryIconUrl } from "./AcpRegistryIcon";
@@ -269,6 +271,28 @@ export function AddProviderInstanceDialog({
     setWizardStep(1);
   };
 
+  // Prefill from the same instance on another paired machine: T3 metadata and
+  // non-secret, non-path config only. Logins stay per machine.
+  const handlePairedSuggestion = (suggestion: PairedProviderInstanceSuggestion) => {
+    setDriver(suggestion.driver);
+    setIsManualAcpConfiguration(false);
+    setIdentityByDriver((existing) =>
+      updateProviderIdentityDraft(existing, suggestion.driver, {
+        label: suggestion.label,
+        accentColor: suggestion.accentColor,
+        instanceIdOverride: suggestion.instanceIdClash ? null : suggestion.sourceInstanceId,
+      }),
+    );
+    setConfigByDriver((existing) => {
+      const next = { ...existing };
+      if (Object.keys(suggestion.config).length === 0) delete next[suggestion.driver];
+      else next[suggestion.driver] = suggestion.config;
+      return next;
+    });
+    setHasAttemptedSubmit(false);
+    setWizardStep(identityStep);
+  };
+
   const handleManualAcpConfiguration = () => {
     setDriver(ACP_REGISTRY_DRIVER_KIND);
     setSelectedAcp(null);
@@ -460,6 +484,11 @@ export function AddProviderInstanceDialog({
                       );
                     })}
                 </RadioGroup>
+                <PairedProviderInstanceSuggestions
+                  environmentId={environmentId}
+                  reservedIds={existingIds}
+                  onPick={handlePairedSuggestion}
+                />
               </div>
 
               {wizardStep === 0 ? (

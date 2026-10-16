@@ -9,6 +9,7 @@ import { ProviderCredentialError } from "@t3tools/provider-core/server/errors";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 
 import { resolveAttachmentPath } from "../attachmentStore.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
@@ -16,6 +17,7 @@ import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ProviderCredentialStore from "./ProviderCredentialStore.ts";
+import * as UsagePolicyService from "../usage/UsagePolicyService.ts";
 
 export const layer = Layer.effect(
   ProviderHost.ProviderHost,
@@ -66,6 +68,22 @@ export const layer = Layer.effect(
           Effect.provideService(ServerSecretStore.ServerSecretStore, secrets),
           Effect.provideService(Crypto.Crypto, crypto),
         ),
+      recordUsagePolicy: (input) =>
+        Effect.gen(function* () {
+          const usagePolicy = yield* Effect.serviceOption(UsagePolicyService.UsagePolicyService);
+          if (Option.isNone(usagePolicy)) return;
+          yield* usagePolicy.value
+            .record({
+              instanceId: input.instanceId,
+              driverKind: input.driverKind,
+              model: input.model,
+              ...(input.authType !== undefined && input.authType !== null && input.authType !== ""
+                ? { authType: input.authType }
+                : {}),
+              delta: input.delta,
+            })
+            .pipe(Effect.catch(() => Effect.void));
+        }),
     });
   }),
 );

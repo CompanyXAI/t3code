@@ -6,6 +6,7 @@ import { Fragment, useState, type ReactNode } from "react";
 import type { SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
 import { useEnvironments, type EnvironmentPresentation } from "../../state/environments";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
+import { MACHINE_NAME_REDACT_PROPS, RedactedSensitiveText } from "./RedactedSensitiveText";
 import { ProjectFavicon } from "../ProjectFavicon";
 import { InlineButton } from "../ui/button";
 import {
@@ -98,6 +99,7 @@ interface ScopeOption {
   secondary?: string;
   icon?: ReactNode;
   offline?: boolean;
+  redact?: boolean;
 }
 
 function ScopeOptionLabel({ option }: { option: ScopeOption }) {
@@ -105,9 +107,25 @@ function ScopeOptionLabel({ option }: { option: ScopeOption }) {
     <>
       {option.icon}
       <span className="min-w-0 flex-1">
-        <span className="block truncate">{option.label}</span>
+        {option.redact ? (
+          <RedactedSensitiveText
+            value={option.label}
+            {...MACHINE_NAME_REDACT_PROPS}
+            className="block truncate"
+          />
+        ) : (
+          <span className="block truncate">{option.label}</span>
+        )}
         {option.secondary ? (
-          <span className="block truncate text-xs text-muted-foreground">{option.secondary}</span>
+          option.redact ? (
+            <RedactedSensitiveText
+              value={option.secondary}
+              {...MACHINE_NAME_REDACT_PROPS}
+              className="block truncate text-xs text-muted-foreground"
+            />
+          ) : (
+            <span className="block truncate text-xs text-muted-foreground">{option.secondary}</span>
+          )
         ) : null}
       </span>
       {option.offline ? (
@@ -126,6 +144,7 @@ function ScopeMenu({
   allOption,
   searchLabel,
   onChange,
+  redactLabel = false,
 }: {
   ariaLabel: string;
   icon: ReactNode;
@@ -135,6 +154,7 @@ function ScopeMenu({
   allOption: ScopeOption | null;
   searchLabel: string;
   onChange: (next: string) => void;
+  redactLabel?: boolean;
 }) {
   const [query, setQuery] = useState("");
   const Trigger = options.length > 6 ? ComboboxTrigger : MenuTrigger;
@@ -145,7 +165,15 @@ function ScopeMenu({
       className="min-w-0 max-w-72"
     >
       {icon}
-      <span className="min-w-0 truncate">{label}</span>
+      {redactLabel ? (
+        <RedactedSensitiveText
+          value={label}
+          {...MACHINE_NAME_REDACT_PROPS}
+          className="min-w-0 truncate"
+        />
+      ) : (
+        <span className="min-w-0 truncate">{label}</span>
+      )}
       <ChevronDownIcon aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
     </Trigger>
   );
@@ -241,6 +269,7 @@ function EnvironmentScopeMenu({
   return (
     <ScopeMenu
       ariaLabel="Environment scope"
+      redactLabel
       icon={
         selected ? (
           <EnvironmentMachineIcon
@@ -288,6 +317,7 @@ function EnvironmentScopeMenu({
             />
           ),
           offline: environment.connection.phase !== "connected",
+          redact: true,
         };
       })}
     />

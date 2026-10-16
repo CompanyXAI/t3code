@@ -14,10 +14,16 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as HttpClient from "effect/http/HttpClient";
-import { readCursorUsageLimits } from "./usageLimits.ts";
+import { getDefaultSdkAuthPath } from "./sdk.ts";
+import { readCursorInstanceUsageLimits } from "./profileUsage.ts";
 
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { makeCursorTextGeneration } from "./textGeneration.ts";
+import {
+  CURSOR_HOOK_BRIDGE_STATE_FILE,
+  configureSharedCursorHookBridge,
+} from "./CursorHookBridge.ts";
 import { CursorAdapterV2Driver, type CursorAdapterV2DriverEnv } from "./adapter.ts";
 import { ProviderDriverError } from "@t3tools/provider-core/server/errors";
 import { buildInitialCursorProviderSnapshot, checkCursorProviderStatus } from "./status.ts";
@@ -39,6 +45,8 @@ import {
 import { probeCursorSkills } from "./skills.ts";
 import { makeCursorAuth } from "./auth.ts";
 import * as CursorCredentialStore from "./credentialStore.ts";
+import { isStandardCursorHome } from "./CursorHome.ts";
+import { detectCursorExistingLogin, type CursorExistingLogin } from "./existingLogin.ts";
 import * as CursorAgentSdk from "./CursorAgentSdk.ts";
 import * as CursorSdk from "./CursorSdk.ts";
 import * as CursorKeychain from "./CursorKeychain.ts";
@@ -75,15 +83,16 @@ export const CursorDriver: ProviderDriver<
   },
   configSchema: CursorSettings,
   defaultConfig: (): CursorSettings => decodeCursorSettings({}),
-  // One account source per environment: the host's Cursor CLI login.
+  // Each instance's CLI login, read from its Cursor home like Claude's and Codex's homePath.
   usage: {
     kind: "scan",
     provider: "cursor",
-    scan: ({ settings, windowStartMs, retentionCutoffMs, awaitRefresh }) =>
+    scan: ({ instances, settings, windowStartMs, retentionCutoffMs, awaitRefresh }) =>
       CursorUsageAccounts.CursorUsageAccounts.pipe(
         Effect.flatMap((accounts) =>
           accounts.scan({
             keychainUsageEnabled: settings.cursorKeychainUsageEnabled,
+            instances,
             windowStartMs,
             retentionCutoffMs,
             awaitRefresh,
@@ -104,14 +113,22 @@ export const CursorDriver: ProviderDriver<
         driverKind: DRIVER_KIND,
         instanceId,
       });
+      const fallbackName = "Cursor";
       const stampIdentity = withInstanceIdentity({
         instanceId,
         driverKind: DRIVER_KIND,
-        displayName: displayName ?? "Cursor",
+        displayName: displayName ?? fallbackName,
         accentColor,
         continuationGroupKey: continuationIdentity.continuationKey,
       });
       const effectiveConfig = { ...config, enabled } satisfies CursorSettings;
+      const home = yield* HostProcess.HomeDirectory;
+      const platform = yield* HostProcess.Platform;
+      const standardHome = isStandardCursorHome(effectiveConfig, {
+        platform,
+        environment: processEnv,
+        home,
+      });
       const credentials = yield* CursorCredentialStore.makeCursorCredentialStore(
         instanceId,
         path.join(
@@ -120,6 +137,9 @@ export const CursorDriver: ProviderDriver<
           encodeURIComponent(instanceId),
           "cursor.json",
         ),
+        // Codex "Use existing CLI" analogue: adopt ~/.cursor/sdk/auth.json for
+        // the machine's standard login only (never for custom homePath profiles).
+        standardHome ? getDefaultSdkAuthPath() : undefined,
       ).pipe(
         Effect.mapError(
           (cause) =>
@@ -133,7 +153,7 @@ export const CursorDriver: ProviderDriver<
       );
       const auth = yield* makeCursorAuth({
         instanceId,
-        displayName: displayName ?? "Cursor",
+        displayName: displayName ?? fallbackName,
         enabled,
         ...(processEnv.CURSOR_API_KEY ? { apiKey: processEnv.CURSOR_API_KEY } : {}),
         store: credentials.store,
@@ -163,6 +183,10 @@ export const CursorDriver: ProviderDriver<
           },
         });
 
+      // Worker hooks keep working across restarts only with a persisted token.
+      configureSharedCursorHookBridge({
+        stateFile: path.join(host.paths.stateDir, CURSOR_HOOK_BRIDGE_STATE_FILE),
+      });
       const orchestrationAdapter = yield* CursorAdapterV2Driver.create({
         instanceId,
         displayName,
@@ -216,33 +240,48 @@ export const CursorDriver: ProviderDriver<
 
       const checkProvider = auth.readApiKey.pipe(
         Effect.orElseSucceed(() => undefined),
-        Effect.flatMap((apiKey) =>
-          checkCursorProviderStatus(
-            effectiveConfig,
-            {
-              ...processEnv,
-              CURSOR_API_KEY: apiKey,
-            },
-            auth.usesApiKey ? "api-key" : "browser",
-          ).pipe(
-            Effect.flatMap((snapshot) =>
-              effectiveConfig.enabled &&
-              snapshot.installed &&
-              snapshot.auth.status === "authenticated"
-                ? host.settings.get.pipe(
-                    Effect.flatMap((settings) =>
-                      readCursorUsageLimits(
-                        effectiveConfig,
-                        { ...processEnv, CURSOR_API_KEY: apiKey },
-                        settings.cursorKeychainUsageEnabled,
-                      ),
-                    ),
-                    Effect.map((usageLimits) => ({ ...snapshot, usageLimits })),
-                  )
-                : Effect.succeed(snapshot),
+        Effect.flatMap((apiKey) => {
+          const existingLoginEffect: Effect.Effect<
+            CursorExistingLogin | undefined,
+            never,
+            FileSystem.FileSystem
+          > = effectiveConfig.enabled
+            ? Effect.succeed(undefined)
+            : detectCursorExistingLogin(processEnv).pipe(
+                Effect.orElseSucceed(() => ({ kind: "none" as const })),
+              );
+          return existingLoginEffect.pipe(
+            Effect.flatMap((existingLogin) =>
+              checkCursorProviderStatus(
+                effectiveConfig,
+                {
+                  ...processEnv,
+                  CURSOR_API_KEY: apiKey,
+                },
+                auth.usesApiKey ? "api-key" : "browser",
+                existingLogin,
+              ).pipe(
+                Effect.flatMap((snapshot) =>
+                  effectiveConfig.enabled &&
+                  snapshot.installed &&
+                  snapshot.auth.status === "authenticated"
+                    ? host.settings.get.pipe(
+                        Effect.flatMap((settings) =>
+                          readCursorInstanceUsageLimits(
+                            effectiveConfig,
+                            processEnv,
+                            apiKey,
+                            settings.cursorKeychainUsageEnabled,
+                          ),
+                        ),
+                        Effect.map((usageLimits) => ({ ...snapshot, usageLimits })),
+                      )
+                    : Effect.succeed(snapshot),
+                ),
+              ),
             ),
-          ),
-        ),
+          );
+        }),
         Effect.provideService(HttpClient.HttpClient, httpClient),
         Effect.provideService(FileSystem.FileSystem, fileSystem),
         Effect.provideService(Path.Path, path),
@@ -300,6 +339,18 @@ export const CursorDriver: ProviderDriver<
                   ),
                 ),
               ]).pipe(Effect.map(([machineSnapshot, skills]) => ({ ...machineSnapshot, skills }))),
+        agentDirectoryApiKey: auth.requireApiKey.pipe(
+          Effect.mapError(
+            (cause) =>
+              new ProviderDriverError({
+                driver: DRIVER_KIND,
+                instanceId,
+                detail: "Sign in to Cursor to list its agents.",
+                cause,
+              }),
+          ),
+        ),
+        homePath: effectiveConfig.homePath,
         orchestrationAdapter,
         textGeneration,
       } satisfies ProviderInstance;

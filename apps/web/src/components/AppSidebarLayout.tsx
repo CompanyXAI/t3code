@@ -34,6 +34,7 @@ import {
 import LegacyThreadSidebar from "./LegacySidebar";
 import { useThreadVisitedMigration } from "../hooks/useThreadVisitedMigration";
 import ThreadSidebar from "./Sidebar";
+import { RedactionControlsMenu } from "./settings/RedactionControlsMenu";
 import { SettingsSidebarNav } from "./settings/SettingsSidebarNav";
 import { SidebarBrandWidthProbe, SidebarChromeHeader } from "./sidebar/SidebarChrome";
 import { MainAppLocationTracker } from "./sidebar/mainAppLocation";
@@ -165,6 +166,12 @@ function SidebarControl() {
           Toggle main sidebar{shortcutLabel ? ` (${shortcutLabel})` : ""}
         </TooltipPopup>
       </Tooltip>
+      {/* The titlebar copy is hidden with the sidebar, so the blur menu moves here. */}
+      {isSidebarVisible ? null : (
+        <div className="pointer-events-auto ml-1 flex items-center">
+          <RedactionControlsMenu />
+        </div>
+      )}
     </div>
   );
 }

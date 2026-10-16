@@ -39,7 +39,11 @@ describe("ProviderSettingsForm helpers", () => {
     const cursor = providerClients.get(ProviderDriverKind.make("cursor"));
 
     expect(cursor).toBeDefined();
-    expect(deriveProviderSettingsFields(cursor!)).toEqual([]);
+    // Approval hooks plus the per-account Cursor home (ef9e6c25d); no legacy Cursor CLI fields.
+    expect(deriveProviderSettingsFields(cursor!).map((field) => field.key)).toEqual([
+      "approvalHooks",
+      "homePath",
+    ]);
     expect(cursor?.environmentFields).toEqual([
       {
         name: "CURSOR_API_KEY",

@@ -14,6 +14,7 @@ import {
   checkCursorProviderStatus,
 } from "./status.ts";
 import * as CursorSdkCatalog from "./CursorSdkCatalog.ts";
+import { cursorRunsOnDescriptor } from "./runsOn.ts";
 
 const decodeCursorSettings = Schema.decodeSync(CursorSettingsSchema);
 
@@ -142,6 +143,7 @@ describe("Cursor SDK model discovery", () => {
           ]),
           booleanDescriptor("fastMode", "Fast", false),
           booleanDescriptor("thinking", "Thinking", true),
+          cursorRunsOnDescriptor(),
         ],
       }),
     );
@@ -247,6 +249,50 @@ describe("checkCursorProviderStatus", () => {
         auth: { status: "unauthenticated" },
         message: "Sign in with Cursor or add CURSOR_API_KEY in provider settings.",
       });
+    }),
+  );
+});
+
+describe("checkCursorProviderStatus disabled existing login", () => {
+  it.effect("surfaces an importable SDK login while Cursor stays disabled", () =>
+    Effect.gen(function* () {
+      const provider = yield* checkCursorProviderStatus(
+        decodeCursorSettings({ enabled: false }),
+        {},
+        "browser",
+        { kind: "sdk", email: "ready@example.com" },
+      ).pipe(Effect.provide(CursorSdkCatalog.layerTest(() => Effect.die("unused"))));
+
+      expect(provider).toMatchObject({
+        enabled: false,
+        installed: true,
+        status: "disabled",
+        auth: {
+          status: "authenticated",
+          type: "browser",
+          email: "ready@example.com",
+        },
+        message: "Cursor SDK login found (ready@example.com). Enable to use it.",
+      });
+    }),
+  );
+
+  it.effect("surfaces a CLI session that still needs a T3 agent login", () =>
+    Effect.gen(function* () {
+      const provider = yield* checkCursorProviderStatus(
+        decodeCursorSettings({ enabled: false }),
+        {},
+        "browser",
+        { kind: "cli" },
+      ).pipe(Effect.provide(CursorSdkCatalog.layerTest(() => Effect.die("unused"))));
+
+      expect(provider).toMatchObject({
+        enabled: false,
+        installed: true,
+        status: "disabled",
+        auth: { status: "unknown" },
+      });
+      expect(provider.message).toContain("signed in on this computer");
     }),
   );
 });

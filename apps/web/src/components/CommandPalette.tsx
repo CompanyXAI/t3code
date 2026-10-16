@@ -204,6 +204,7 @@ import {
 } from "./CommandPaletteResults";
 import { sourceControlIcon } from "~/sourceControlPresentation";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
+import { MACHINE_NAME_REDACT_PROPS, RedactedSensitiveText } from "./settings/RedactedSensitiveText";
 import { Checkbox } from "./ui/checkbox";
 import { ProjectFavicon } from "./ProjectFavicon";
 import { ProjectFilePicker } from "./files/ProjectFilePicker";
@@ -1274,7 +1275,11 @@ function OpenCommandPaletteDialog(props: {
                     className={COMMAND_PALETTE_META_ICON_CLASS}
                   />
                 ) : null}
-                <span className="truncate">{location.label}</span>
+                <RedactedSensitiveText
+                  value={location.label}
+                  {...MACHINE_NAME_REDACT_PROPS}
+                  className="truncate"
+                />
               </span>
               <CommandPaletteMetaDot />
               <span className="truncate">{project.workspaceRoot}</span>
@@ -1695,7 +1700,15 @@ function OpenCommandPaletteDialog(props: {
     kind: "action",
     value,
     searchTerms: [option.label, option.environmentId, option.isPrimary ? "this device" : ""],
-    title: option.label,
+    title: option.isPrimary ? (
+      option.label
+    ) : (
+      <RedactedSensitiveText
+        value={option.label}
+        {...MACHINE_NAME_REDACT_PROPS}
+        className="truncate text-sm font-normal"
+      />
+    ),
     description: option.isConnected
       ? option.isPrimary
         ? "This device"
@@ -2084,7 +2097,13 @@ function OpenCommandPaletteDialog(props: {
       value: "action:add-project:wsl-folder",
       searchTerms: ["add project", "open", "wsl", "linux", "folder", "directory"],
       title: "Open WSL folder",
-      description: wslAddProjectEnvironmentOption.label,
+      description: (
+        <RedactedSensitiveText
+          value={wslAddProjectEnvironmentOption.label}
+          {...MACHINE_NAME_REDACT_PROPS}
+          className="truncate text-xs font-normal"
+        />
+      ),
       icon: <FolderPlusIcon className={ITEM_ICON_CLASS} />,
       keepOpen: true,
       run: async () => {
@@ -3575,7 +3594,16 @@ function OpenCommandPaletteDialog(props: {
                 {newProjectName.length > 0
                   ? `Creates ${newProjectPathPreview}`
                   : `Goes in ${newProjectsRoot}`}
-                {newProjectEnvironmentLabel === null ? null : ` on ${newProjectEnvironmentLabel}`}
+                {newProjectEnvironmentLabel === null ? null : (
+                  <>
+                    {" on "}
+                    <RedactedSensitiveText
+                      value={newProjectEnvironmentLabel}
+                      {...MACHINE_NAME_REDACT_PROPS}
+                      className="inline text-inherit"
+                    />
+                  </>
+                )}
               </span>
             </span>
           </div>
@@ -3655,7 +3683,11 @@ function ProjectSearchDescription(props: {
               className={COMMAND_PALETTE_META_ICON_CLASS}
             />
           ) : null}
-          <span className="truncate">{props.location.label}</span>
+          <RedactedSensitiveText
+            value={props.location.label}
+            {...MACHINE_NAME_REDACT_PROPS}
+            className="truncate"
+          />
         </span>
         <CommandPaletteMetaDot />
         <span className="truncate">{props.workspaceRoot}</span>
@@ -3663,5 +3695,11 @@ function ProjectSearchDescription(props: {
     );
   }
 
-  return <span className="truncate">{props.environmentLabels.join(" · ")}</span>;
+  return (
+    <RedactedSensitiveText
+      value={props.environmentLabels.join(" · ")}
+      {...MACHINE_NAME_REDACT_PROPS}
+      className="truncate"
+    />
+  );
 }

@@ -12,7 +12,8 @@ import {
   turnItemOutputText,
 } from "@t3tools/client-runtime/work-log/item-detail";
 import { formatDiffCount } from "@t3tools/client-runtime/diff-count";
-import { isJavaScriptReplTool } from "@t3tools/shared/toolActivity";
+import { isJavaScriptReplTool, isToolPathArgKey } from "@t3tools/shared/toolActivity";
+import { useRedactedDisplay } from "../settings/RedactedSensitiveText";
 import { ExternalLinkIcon, GitBranchIcon, RotateCcwIcon } from "lucide-react";
 import { memo, type ReactNode, Suspense, use, useMemo } from "react";
 
@@ -203,6 +204,12 @@ export function FetchedToolOutput(props: {
   );
 }
 
+/** Non-interactive Paths-category blur for tool arg / result paths. */
+function RedactedToolPath({ value }: { readonly value: string }) {
+  const { revealed, display } = useRedactedDisplay("path", value);
+  return <span className={cn(!revealed && "select-none blur-xs")}>{display}</span>;
+}
+
 /** A tool call's body: the call itself in the foreground, its result muted below. */
 function ToolCallBody(
   props: ToolOutputState & {
@@ -225,6 +232,8 @@ function ToolCallBody(
               <span className="text-muted-foreground">{key} </span>
               {key === "code" && isJavaScriptReplTool(props.toolName) ? (
                 <StructuredValue value={value} language="typescript" />
+              ) : isToolPathArgKey(key) ? (
+                <RedactedToolPath value={value} />
               ) : (
                 value
               )}
@@ -292,7 +301,9 @@ export const V2ItemInspector = memo(function V2ItemInspector(props: V2ItemInspec
         <div className="space-y-2">
           <div className="flex flex-wrap items-center gap-2">
             <span className="font-mono text-muted-foreground">
-              {formatWorkspaceRelativePath(item.fileName, props.workspaceRoot)}
+              <RedactedToolPath
+                value={formatWorkspaceRelativePath(item.fileName, props.workspaceRoot)}
+              />
             </span>
             {item.additions !== undefined || item.deletions !== undefined ? (
               <span>
@@ -317,8 +328,16 @@ export const V2ItemInspector = memo(function V2ItemInspector(props: V2ItemInspec
             <ul className="space-y-1 font-mono text-muted-foreground">
               {item.changes.map((change, index) => (
                 <li key={`${change.operation}:${change.path}:${index}`}>
-                  {change.operation} {change.oldPath ? `${change.oldPath} → ` : ""}
-                  {formatWorkspaceRelativePath(change.path, props.workspaceRoot)}
+                  {change.operation}{" "}
+                  {change.oldPath ? (
+                    <>
+                      <RedactedToolPath value={change.oldPath} />
+                      {" → "}
+                    </>
+                  ) : null}
+                  <RedactedToolPath
+                    value={formatWorkspaceRelativePath(change.path, props.workspaceRoot)}
+                  />
                   {change.fileType || change.mimeType
                     ? ` (${[change.fileType, change.mimeType].filter(Boolean).join(", ")})`
                     : ""}
@@ -342,7 +361,9 @@ export const V2ItemInspector = memo(function V2ItemInspector(props: V2ItemInspec
           {item.results.map((result) => (
             <li key={JSON.stringify(result)}>
               <span className="font-mono text-foreground/80">
-                {formatWorkspaceRelativePath(result.fileName, props.workspaceRoot)}
+                <RedactedToolPath
+                  value={formatWorkspaceRelativePath(result.fileName, props.workspaceRoot)}
+                />
                 {result.line === undefined ? "" : `:${result.line}`}
                 {result.column === undefined ? "" : `:${result.column}`}
               </span>

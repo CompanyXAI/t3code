@@ -362,7 +362,10 @@ const make = Effect.gen(function* () {
     if (Option.isNone(root)) return Option.none();
     if (!(yield* isScratchProject(input.projectId, root.value))) return Option.none();
     const date = DateTime.formatIso(yield* DateTime.now).slice(0, 10);
-    const words = folderWords(input.text);
+    // Windows: agent tools nest deep stores under a per-folder path (Cursor's
+    // SDK store hits MAX_PATH and fails with "unable to open database file"),
+    // so the folder name keeps only the date and id there.
+    const words = process.platform === "win32" ? "" : folderWords(input.text);
     const id = input.threadId.toLowerCase().replace(/[^a-z0-9]/g, "");
     const folderFor = (idPart: string) =>
       path.join(root.value, [date, words, idPart].filter(Boolean).join("-"));

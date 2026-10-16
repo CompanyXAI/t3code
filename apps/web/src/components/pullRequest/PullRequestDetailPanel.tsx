@@ -101,6 +101,10 @@ import { formatRelativeTimeLabel } from "~/timestampFormat";
 import { useUiStateStore } from "~/uiStateStore";
 
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
+import {
+  MACHINE_NAME_REDACT_PROPS,
+  RedactedSensitiveText,
+} from "../settings/RedactedSensitiveText";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { PullRequestEditButton } from "./PullRequestEditButton";
@@ -304,7 +308,11 @@ function ActOnEnvironmentPicker({
                 kind={environment.machine ?? "server"}
                 className="size-3.5 shrink-0"
               />
-              <span className="truncate">{environment.label}</span>
+              <RedactedSensitiveText
+                value={environment.label}
+                {...MACHINE_NAME_REDACT_PROPS}
+                className="truncate"
+              />
             </span>
           </MenuRadioItem>
         ))}

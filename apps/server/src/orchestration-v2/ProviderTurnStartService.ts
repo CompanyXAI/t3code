@@ -46,6 +46,9 @@ import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import * as RunExecutionService from "./RunExecutionService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
+import * as UsagePolicyService from "../usage/UsagePolicyService.ts";
+import { estimateHandoffContextTokens } from "@t3tools/shared/usagePolicies";
+import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import {
   isRestartNoteContinuation,
   pendingRestartCancelledBackgroundWork,
@@ -520,6 +523,85 @@ export const layer: Layer.Layer<
         inheritedBackgroundTurnItems,
       });
       const { isCurrentAttemptInStatus } = runControls;
+
+      // T3 usage policies: block before opening a provider session when the
+      // model is disallowed or the hard daily cap is already exhausted.
+      {
+        const usagePolicy = yield* Effect.serviceOption(UsagePolicyService.UsagePolicyService);
+        const providerInstances = yield* Effect.serviceOption(
+          ProviderInstanceRegistry.ProviderInstanceRegistry,
+        );
+        if (Option.isSome(usagePolicy) && Option.isSome(providerInstances)) {
+          const instance = yield* providerInstances.value.getInstance(
+            run.modelSelection.instanceId,
+          );
+          if (instance !== undefined) {
+            const snapshot = yield* instance.snapshot.getSnapshot;
+            // Cursor records real SDK turn usage when available. Antigravity has
+            // no billable per-turn stream, so pre-turn still projects with
+            // estimateHandoffContextTokens (reported context preferred; else
+            // chars/4, labeled estimated in the UI).
+            let projectedAdditionalTokens = 0;
+            let projectionEstimated = false;
+            if (instance.driverKind === "cursor" || instance.driverKind === "antigravity") {
+              const measured = latestNativeContextUsage(projection, providerThread);
+              const reported =
+                measured?.usage.usedTokens ?? providerThread.contextUsage?.usedTokens ?? null;
+              const history = yield* projectionStore.getTurnStartHistory(input.threadId);
+              const messages = history.flatMap((item) => {
+                const historical = historicalMessage(item);
+                return historical === null ? [] : [{ text: historical.text }];
+              });
+              projectedAdditionalTokens = estimateHandoffContextTokens(reported, messages);
+              projectionEstimated =
+                !(reported !== null && reported > 0) && projectedAdditionalTokens > 0;
+            }
+            const authType = snapshot.auth.type;
+            const evaluation = yield* usagePolicy.value.evaluate({
+              instanceId: run.modelSelection.instanceId,
+              driverKind: instance.driverKind,
+              model: run.modelSelection.model,
+              ...(authType !== undefined && authType !== null && authType !== ""
+                ? { authType }
+                : {}),
+              projectedAdditionalTokens,
+              projectionEstimated,
+            });
+            if (evaluation.decision === "block_model" || evaluation.decision === "block_cap") {
+              const now = yield* DateTime.now;
+              yield* settleRunBeforeStart({
+                signal: "usage-policy",
+                status: "failed",
+                now,
+                startedAt: now,
+                providerInstanceId: run.providerInstanceId,
+                itemProviderThreadId: providerThread.id,
+                item: {
+                  type: "error",
+                  title:
+                    evaluation.decision === "block_model"
+                      ? "Model blocked by usage policy"
+                      : "Daily usage limit reached",
+                  failure: makeProviderFailure({
+                    class: "usage_limit",
+                    message:
+                      evaluation.message ??
+                      "This turn was blocked by a T3 usage policy before it started.",
+                    code: evaluation.decision,
+                    retryable: false,
+                  }),
+                },
+                providerThreadUpdate: {
+                  ...providerThread,
+                  status: providerThread.nativeThreadRef === null ? "not_loaded" : "idle",
+                  updatedAt: now,
+                },
+              });
+              return;
+            }
+          }
+        }
+      }
 
       const resolvedRuntimePolicy = yield* runtimePolicy.resolve({
         thread: projection.thread,

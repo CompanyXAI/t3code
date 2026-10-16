@@ -16,6 +16,7 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import {
   AuthTerminalOperateScope,
+  AuthSettingsWriteScope,
   CommandId,
   defaultInstanceIdForDriver,
   AuthOrchestrationOperateScope,
@@ -51,8 +52,10 @@ import {
 } from "../../onboarding/projectImport.logic";
 import {
   getOnboardingProviderState,
+  isMultiInstanceOnboardingDriver,
   resolveOnboardingProviderInstallCommand,
   resolveOnboardingProviderLoginCommand,
+  selectOnboardingCursorInstances,
   selectOnboardingProvidersByDriver,
 } from "../../onboarding/providerReadiness.logic";
 import { newProjectId, randomUUID } from "../../lib/utils";
@@ -79,6 +82,13 @@ import { providerClients } from "../settings/providerDriverMeta";
 import { ChatGptWelcomeCoordinator } from "../settings/ChatGptWelcomeCoordinator";
 import { AddManagedCodexAccountDialog, CodexSetupSection } from "../settings/CodexSetupSection";
 import { readCodexSetupMode } from "../settings/CodexSetupSection.logic";
+import { ProviderAuthenticationSection } from "../settings/ProviderAuthenticationSection";
+import {
+  HOST_URL_REDACT_PROPS,
+  MACHINE_NAME_REDACT_PROPS,
+  useRedactedDisplay,
+  RedactedSensitiveText,
+} from "../settings/RedactedSensitiveText";
 import { buildProviderInstanceUpdatePatch } from "../settings/SettingsPanels.logic";
 import { TerminalViewport } from "../ThreadTerminalDrawer";
 import { CloudEnvironmentConnectRows } from "../cloud/CloudEnvironmentConnectList";
@@ -92,6 +102,7 @@ import { Checkbox } from "../ui/checkbox";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import { Input } from "../ui/input";
 import { Tooltip, TooltipTrigger, TooltipPopup } from "../ui/tooltip";
+import { Badge } from "../ui/badge";
 import { ScrollArea } from "../ui/scroll-area";
 import { Spinner } from "../ui/spinner";
 import { WizardPanel, WizardSteps, WizardPopup, WizardHeader } from "../ui/wizard";
@@ -362,7 +373,11 @@ function ConnectionStep({
               <span className="min-w-0 flex-1">
                 <span className="flex items-baseline justify-between gap-3">
                   <span className="min-w-0 text-sm font-medium break-words">
-                    {environment.label}
+                    <RedactedSensitiveText
+                      value={environment.label}
+                      {...MACHINE_NAME_REDACT_PROPS}
+                      className="text-sm font-medium break-words text-foreground"
+                    />
                   </span>
                   <span className="shrink-0 text-xs text-muted-foreground">
                     {/* Same rule as Settings: a switched-off computer reads Off, not Not connected. */}
@@ -373,7 +388,11 @@ function ConnectionStep({
                 </span>
                 {environment.displayUrl ? (
                   <span className="mt-0.5 block text-xs break-all text-muted-foreground">
-                    {environment.displayUrl}
+                    <RedactedSensitiveText
+                      value={environment.displayUrl}
+                      {...HOST_URL_REDACT_PROPS}
+                      className="text-xs break-all text-muted-foreground"
+                    />
                   </span>
                 ) : null}
               </span>
@@ -426,8 +445,18 @@ function ConnectionStep({
       </div>
       {skippedLabels.length > 0 ? (
         <p className="mt-4 text-xs text-muted-foreground">
-          Not connected, so setup skips {skippedLabels.join(", ")}. You can set{" "}
-          {skippedLabels.length === 1 ? "it" : "them"} up later from Settings.
+          Not connected, so setup skips{" "}
+          {skippedLabels.map((label, index) => (
+            <span key={`${label}-${index}`}>
+              {index > 0 ? ", " : null}
+              <RedactedSensitiveText
+                value={label}
+                {...MACHINE_NAME_REDACT_PROPS}
+                className="text-xs"
+              />
+            </span>
+          ))}
+          . You can set {skippedLabels.length === 1 ? "it" : "them"} up later from Settings.
         </p>
       ) : null}
       <div className="mt-6 flex flex-col-reverse gap-4 sm:flex-row sm:items-center sm:justify-between sm:gap-6">
@@ -656,13 +685,15 @@ function PairingForm({
 
 // ── Step 3: agents ───────────────────────────────────────────
 
-const PRIMARY_AGENT_DRIVERS = ["codex", "claudeAgent"] as const;
+const PRIMARY_AGENT_DRIVERS = ["codex", "claudeAgent", "cursor"] as const;
 type OnboardingAgentDriver = (typeof PRIMARY_AGENT_DRIVERS)[number];
 
 /** Setup values stay fixed while provider probes refresh the surrounding cards. */
+type OnboardingCliAgentDriver = Exclude<OnboardingAgentDriver, "cursor">;
+
 interface AgentTerminalSession {
   readonly environmentId: EnvironmentId;
-  readonly driver: OnboardingAgentDriver;
+  readonly driver: OnboardingCliAgentDriver;
   readonly providerInstanceId: ServerProvider["instanceId"];
   readonly cwd: string;
   readonly command: string;
@@ -736,13 +767,38 @@ function ConnectedAgentsStep({
 
   const byDriver = useMemo(() => selectOnboardingProvidersByDriver(providers), [providers]);
 
-  const primaryAgents = PRIMARY_AGENT_DRIVERS.flatMap((driver) => {
-    const instances =
-      driver === "codex" ? providers?.filter((provider) => provider.driver === driver) : undefined;
-    return instances?.length
-      ? instances.map((provider) => ({ driver, provider, instanceId: provider.instanceId }))
-      : [{ driver, provider: byDriver.get(driver), instanceId: byDriver.get(driver)?.instanceId }];
-  });
+  type PrimaryAgentRow = {
+    readonly driver: OnboardingAgentDriver;
+    readonly provider: ServerProvider | undefined;
+    readonly instanceId: ProviderInstanceId | undefined;
+  };
+  const primaryAgents: PrimaryAgentRow[] = PRIMARY_AGENT_DRIVERS.flatMap(
+    (driver): PrimaryAgentRow[] => {
+      if (driver === "cursor") {
+        return selectOnboardingCursorInstances(providers, serverConfig?.settings).map((entry) => ({
+          driver,
+          provider: entry.provider,
+          instanceId: entry.instanceId,
+        }));
+      }
+      const instances = isMultiInstanceOnboardingDriver(driver)
+        ? providers?.filter((provider) => provider.driver === driver)
+        : undefined;
+      return instances?.length
+        ? instances.map((provider) => ({
+            driver,
+            provider,
+            instanceId: provider.instanceId,
+          }))
+        : [
+            {
+              driver,
+              provider: byDriver.get(driver),
+              instanceId: byDriver.get(driver)?.instanceId,
+            },
+          ];
+    },
+  );
   // Keep the newly created row mounted while settings and provider snapshots catch up.
   if (createdAccount) {
     const index = primaryAgents.findIndex(
@@ -759,7 +815,13 @@ function ConnectedAgentsStep({
   }
   return (
     <section>
-      <h2 className="mb-2 text-sm font-medium">{machineLabel}</h2>
+      <h2 className="mb-2 text-sm font-medium">
+        <RedactedSensitiveText
+          value={machineLabel}
+          {...MACHINE_NAME_REDACT_PROPS}
+          className="text-sm font-medium text-foreground"
+        />
+      </h2>
       {!canOperateTerminal ? (
         <p className="mb-2 text-sm text-muted-foreground">
           This connection cannot control terminals.
@@ -802,6 +864,17 @@ function ConnectedAgentsStep({
                   keybindings: serverConfig.keybindings,
                 });
               }}
+            />
+          ) : driver === "cursor" ? (
+            <OnboardingCursorSetup
+              key={instanceId ?? driver}
+              environmentId={environmentId}
+              machineLabel={machineLabel}
+              instanceId={
+                instanceId ?? defaultInstanceIdForDriver(ProviderDriverKind.make("cursor"))
+              }
+              provider={provider}
+              serverConfig={serverConfig}
             />
           ) : (
             <AgentCard
@@ -869,6 +942,182 @@ function ConnectedAgentsStep({
         />
       ) : null}
     </section>
+  );
+}
+
+function OnboardingCursorSetup({
+  environmentId,
+  machineLabel,
+  instanceId,
+  provider,
+  serverConfig,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly machineLabel: string;
+  readonly instanceId: ProviderInstanceId;
+  readonly provider: ServerProvider | undefined;
+  readonly serverConfig: ServerConfig | null;
+}) {
+  const update = useAtomCommand(serverEnvironment.updateSettings, "Cursor setup settings");
+  const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
+    reportFailure: false,
+  });
+  const canWriteSettings = useEnvironmentScope(environmentId, AuthSettingsWriteScope);
+  const [setupOpen, setSetupOpen] = useState(false);
+  const [enabling, setEnabling] = useState(false);
+  const settingsInstance = serverConfig?.settings.providerInstances[instanceId];
+  const providerState = getOnboardingProviderState(provider);
+  const summary = getProviderSummary(provider);
+  const displayName = provider?.displayName || settingsInstance?.displayName || "Cursor";
+  const email = provider?.auth.email?.trim();
+  const ready = providerState === "ready";
+  const existingSdkLogin =
+    providerState === "disabled" && provider?.auth.status === "authenticated";
+  const existingCliHint =
+    providerState === "disabled" &&
+    !settingsInstance &&
+    (provider?.message?.includes("signed in on this computer") ?? false);
+  const existingSdkHint =
+    providerState === "disabled" &&
+    !settingsInstance &&
+    (existingSdkLogin || (provider?.message?.includes("SDK login found") ?? false));
+  const showAuth =
+    setupOpen &&
+    provider !== undefined &&
+    !ready &&
+    provider.setup?.canAuthenticate !== false &&
+    provider.enabled;
+
+  const enableAndSetup = async () => {
+    if (!canWriteSettings || serverConfig === null || enabling) {
+      setSetupOpen(true);
+      return;
+    }
+    setEnabling(true);
+    try {
+      if (!provider?.enabled) {
+        const settings = serverConfig.settings;
+        const instance = settings.providerInstances[instanceId] ?? {
+          driver: ProviderDriverKind.make("cursor"),
+          config: {},
+        };
+        await update({
+          environmentId,
+          input: {
+            patch: buildProviderInstanceUpdatePatch({
+              settings,
+              instanceId,
+              instance: {
+                ...instance,
+                enabled: true,
+                config: {
+                  ...(instance.config !== null && typeof instance.config === "object"
+                    ? instance.config
+                    : {}),
+                  enabled: true,
+                },
+              },
+            }),
+          },
+        });
+        await refreshProviders({ environmentId, input: {} });
+      }
+      setSetupOpen(true);
+    } finally {
+      setEnabling(false);
+    }
+  };
+
+  return (
+    <>
+      <div className="flex items-center gap-3 rounded-lg border border-border bg-background px-4 py-4">
+        <ProviderInstanceIcon
+          driverKind={ProviderDriverKind.make("cursor")}
+          displayName={displayName}
+          iconClassName="size-5"
+        />
+        <div className="min-w-0 flex-1">
+          <span className="block text-sm font-medium text-foreground">{displayName}</span>
+          <p className="mt-0.5 text-xs leading-relaxed break-words whitespace-pre-wrap text-muted-foreground">
+            {ready ? (
+              email ? (
+                <>
+                  Signed in as{" "}
+                  <RedactedSensitiveText
+                    value={email}
+                    ariaLabel="Toggle account email visibility"
+                    revealTooltip="Click to reveal email"
+                    hideTooltip="Click to hide email"
+                    className="break-all"
+                  />
+                  .
+                </>
+              ) : (
+                "Ready to code."
+              )
+            ) : providerState === "checking" ? (
+              settingsInstance ? (
+                "Checking this Cursor account on the computer…"
+              ) : (
+                summary.headline
+              )
+            ) : providerState === "disabled" ? (
+              settingsInstance ? (
+                summary.headline
+              ) : existingSdkHint || existingCliHint ? (
+                provider?.message?.trim() || summary.headline
+              ) : (
+                "Not set up on this computer yet."
+              )
+            ) : (
+              <>
+                {summary.headline}
+                {summary.detail ? ` · ${summary.detail}` : ""}
+              </>
+            )}
+          </p>
+        </div>
+        <div className="shrink-0">
+          {ready ? (
+            <span className="inline-flex items-center gap-1.5 text-xs font-medium text-success-foreground">
+              <CheckIcon className="size-3.5" />
+              Ready
+            </span>
+          ) : providerState === "checking" ? (
+            <span className="text-xs text-muted-foreground">Checking...</span>
+          ) : showAuth ? (
+            <span className="text-xs text-muted-foreground">Sign in below</span>
+          ) : (
+            <Button
+              size="xs"
+              variant="ghost"
+              disabled={enabling || !canWriteSettings}
+              onClick={() => void enableAndSetup()}
+            >
+              {providerState === "signIn" ? "Sign in" : existingSdkHint ? "Use existing" : "Set up"}
+            </Button>
+          )}
+        </div>
+      </div>
+      {showAuth ? (
+        <div className="mt-1.5 rounded-lg border border-border bg-background px-4 py-3">
+          <ProviderAuthenticationSection
+            environmentId={environmentId}
+            environmentLabel={machineLabel}
+            instanceId={instanceId}
+            provider={provider}
+            readOnly={!canWriteSettings}
+          />
+        </div>
+      ) : setupOpen &&
+        provider !== undefined &&
+        !ready &&
+        provider.setup?.canAuthenticate === false ? (
+        <p className="mt-1.5 px-1 text-xs text-muted-foreground">
+          Add a Cursor API key under Settings → Providers on {machineLabel}.
+        </p>
+      ) : null}
+    </>
   );
 }
 
@@ -964,7 +1213,7 @@ function AgentCard({
   terminalAvailable,
   onOpenTerminal,
 }: {
-  readonly driver: OnboardingAgentDriver;
+  readonly driver: OnboardingCliAgentDriver;
   readonly provider: ServerProvider | undefined;
   readonly terminalOpen: boolean;
   readonly terminalAvailable: boolean;
@@ -1443,7 +1692,7 @@ function ImportStep({
         <div className="flex flex-1 flex-col items-center justify-center gap-3 py-6">
           <Spinner size="lg" tone="muted" />
           <p className="text-center text-sm text-muted-foreground">
-            Looking for projects from Claude Code and Codex…
+            Looking for projects from Claude Code, Codex, and Cursor…
           </p>
         </div>
         <div className="flex justify-end">
@@ -1458,7 +1707,7 @@ function ImportStep({
   return (
     <StepShell
       title="Import your projects"
-      description="Import projects and conversations from Claude Code and Codex on your selected computers."
+      description="Import projects and conversations from Claude Code, Codex, and Cursor on your selected computers."
     >
       {candidates.length > 0 ? (
         <div className="mt-5 flex items-center justify-between gap-3 text-xs text-muted-foreground">
@@ -1501,7 +1750,13 @@ function ImportStep({
                 disabled={isImporting}
               >
                 {scans.length > 1 ? (
-                  <legend className="mb-2 text-sm font-medium">{label}</legend>
+                  <legend className="mb-2 text-sm font-medium">
+                    <RedactedSensitiveText
+                      value={label}
+                      {...MACHINE_NAME_REDACT_PROPS}
+                      className="text-sm font-medium text-foreground"
+                    />
+                  </legend>
                 ) : null}
                 {scan.isPending && scan.data === null ? (
                   <div className="flex items-center gap-2 py-3 text-sm text-muted-foreground">
@@ -1520,7 +1775,7 @@ function ImportStep({
                   </div>
                 ) : scanCandidates.length === 0 ? (
                   <p className="py-2 text-sm text-muted-foreground">
-                    No existing Claude Code or Codex projects found.
+                    No existing Claude Code, Codex, or Cursor projects found.
                   </p>
                 ) : null}
                 {scan.data?.truncated ? (
@@ -1533,6 +1788,7 @@ function ImportStep({
                   selectedKeys={selectedKeys}
                   onSelectionChange={setSelectedPaths}
                 />
+                <ImportOrphanList orphans={scan.data?.orphans ?? []} />
               </fieldset>
             );
           })}
@@ -1639,6 +1895,48 @@ function ImportCandidateList({
   );
 }
 
+/**
+ * Sessions with no recorded cwd. Shown so they are not silently hidden; they
+ * have no project to bind to, so they cannot be selected, imported or resumed.
+ */
+function ImportOrphanList({
+  orphans,
+}: {
+  readonly orphans: ReadonlyArray<{
+    readonly source: "claudeAgent" | "codex" | "cursor";
+    readonly providerSessionId: string;
+    readonly lastActiveAt: string | null;
+  }>;
+}) {
+  if (orphans.length === 0) return null;
+  return (
+    <Collapsible>
+      <CollapsibleTrigger className="group mt-2 flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left hover:bg-muted/40">
+        <ChevronRightIcon className="size-3.5 shrink-0 text-muted-foreground transition-transform group-data-panel-open:rotate-90" />
+        <span className="text-sm font-medium">Orphans</span>
+        <span className="text-xs text-muted-foreground">
+          {orphans.length} without a recorded folder (not importable)
+        </span>
+      </CollapsibleTrigger>
+      <CollapsiblePanel>
+        {orphans.map((orphan) => (
+          <div
+            key={`${orphan.source}:${orphan.providerSessionId}`}
+            className="flex items-center gap-2.5 px-2 py-1 pl-8 text-xs text-muted-foreground"
+          >
+            <span className="min-w-0 flex-1 truncate font-mono">{orphan.providerSessionId}</span>
+            <ImportRowMeta
+              sources={[orphan.source]}
+              threadCount={1}
+              lastActiveAt={orphan.lastActiveAt}
+            />
+          </div>
+        ))}
+      </CollapsiblePanel>
+    </Collapsible>
+  );
+}
+
 function ImportRepositoryGroup({
   group,
   selectedKeys,
@@ -1701,6 +1999,11 @@ function ImportRepositoryGroup({
  * Clones of one repository and plain folders differ only by folder name, so
  * the name stays visible and the shared parent path truncates first.
  */
+function RedactedPathPopupText({ path }: { readonly path: string }) {
+  const { revealed, display } = useRedactedDisplay("path", path);
+  return <span className={cn(!revealed && "select-none blur-xs")}>{display}</span>;
+}
+
 function ProjectPathText({
   path,
   className,
@@ -1708,9 +2011,16 @@ function ProjectPathText({
   readonly path: string;
   readonly className?: string;
 }) {
-  const { name, parent } = splitOnboardingProjectPath(path);
+  const { revealed, display } = useRedactedDisplay("path", path);
+  const { name, parent } = splitOnboardingProjectPath(display);
   return (
-    <span className={cn("flex min-w-0 items-baseline font-mono", className)}>
+    <span
+      className={cn(
+        "flex min-w-0 items-baseline font-mono",
+        !revealed && "select-none blur-xs",
+        className,
+      )}
+    >
       {parent.length > 0 ? <span className="truncate">{parent}</span> : null}
       <span className="max-w-full shrink-0 truncate">{name}</span>
     </span>
@@ -1735,35 +2045,98 @@ function ImportCandidateRow({
   readonly onCheckedChange: (checked: boolean) => void;
 }) {
   return (
-    <label
-      className={cn(
-        "flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 hover:bg-muted/40 has-disabled:cursor-default",
-        nested && "pl-8",
-      )}
-    >
-      <Checkbox checked={checked} onCheckedChange={(value) => onCheckedChange(value === true)} />
-      <Tooltip>
-        <TooltipTrigger
-          render={<span className="flex min-w-0 flex-1 items-baseline gap-2 truncate" />}
-        >
-          {label !== undefined ? (
-            <span className="truncate text-sm font-medium">{label}</span>
-          ) : null}
-          {path !== undefined ? (
-            <ProjectPathText
-              path={path}
-              className={label === undefined ? "text-xs" : "text-2xs text-muted-foreground"}
+    <>
+      <label
+        className={cn(
+          "flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 hover:bg-muted/40 has-disabled:cursor-default",
+          nested && "pl-8",
+        )}
+      >
+        <Checkbox checked={checked} onCheckedChange={(value) => onCheckedChange(value === true)} />
+        <Tooltip>
+          <TooltipTrigger
+            render={<span className="flex min-w-0 flex-1 items-baseline gap-2 truncate" />}
+          >
+            {label !== undefined ? (
+              <span className="truncate text-sm font-medium">{label}</span>
+            ) : null}
+            {path !== undefined ? (
+              <ProjectPathText
+                path={path}
+                className={label === undefined ? "text-xs" : "text-2xs text-muted-foreground"}
+              />
+            ) : null}
+          </TooltipTrigger>
+          <TooltipPopup variant="code">
+            <RedactedPathPopupText path={candidate.path} />
+          </TooltipPopup>
+        </Tooltip>
+        <ImportRowMeta
+          sources={nested ? null : candidate.sources}
+          threadCount={candidate.threadCount}
+          lastActiveAt={candidate.lastActiveAt}
+        />
+      </label>
+      <ImportCandidateThreads candidate={candidate} nested={nested} />
+    </>
+  );
+}
+
+/** Expandable list of the sessions behind a candidate, so the user sees what gets imported. */
+function ImportCandidateThreads({
+  candidate,
+  nested,
+}: {
+  readonly candidate: ImportCandidate;
+  readonly nested: boolean;
+}) {
+  const threads = candidate.threads ?? [];
+  if (threads.length === 0) return null;
+  const hidden = candidate.threadCount - threads.length;
+  return (
+    <Collapsible>
+      <CollapsibleTrigger
+        className={cn(
+          "group flex w-full items-center gap-1.5 rounded-md px-2 py-0.5 text-left text-2xs text-muted-foreground hover:bg-muted/40",
+          nested ? "pl-14" : "pl-8",
+        )}
+      >
+        <ChevronRightIcon className="size-3 shrink-0 transition-transform group-data-panel-open:rotate-90" />
+        Show {candidate.threadCount} {candidate.threadCount === 1 ? "chat" : "chats"}
+      </CollapsibleTrigger>
+      <CollapsiblePanel>
+        {threads.map((thread) => (
+          <div
+            key={`:${thread.providerSessionId}`}
+            className={cn(
+              "flex items-center gap-2.5 px-2 py-0.5 text-xs text-muted-foreground",
+              nested ? "pl-16" : "pl-10",
+            )}
+          >
+            <span className="min-w-0 flex-1 truncate" title={thread.providerSessionId}>
+              {thread.title ?? <span className="font-mono">{thread.providerSessionId}</span>}
+            </span>
+            {(thread.labels ?? []).map((label) => (
+              <Badge key={label} size="sm" variant="outline" className="shrink-0">
+                {label}
+              </Badge>
+            ))}
+            <ImportRowMeta
+              sources={[thread.source]}
+              threadCount={1}
+              lastActiveAt={thread.lastActiveAt}
             />
-          ) : null}
-        </TooltipTrigger>
-        <TooltipPopup variant="code">{candidate.path}</TooltipPopup>
-      </Tooltip>
-      <ImportRowMeta
-        sources={nested ? null : candidate.sources}
-        threadCount={candidate.threadCount}
-        lastActiveAt={candidate.lastActiveAt}
-      />
-    </label>
+          </div>
+        ))}
+        {hidden > 0 ? (
+          <div
+            className={cn("px-2 py-0.5 text-2xs text-muted-foreground", nested ? "pl-16" : "pl-10")}
+          >
+            and {hidden} more
+          </div>
+        ) : null}
+      </CollapsiblePanel>
+    </Collapsible>
   );
 }
 
@@ -1777,7 +2150,7 @@ function ImportRowMeta({
   threadCount,
   lastActiveAt,
 }: {
-  readonly sources: ReadonlyArray<"claudeAgent" | "codex"> | null;
+  readonly sources: ReadonlyArray<"claudeAgent" | "codex" | "cursor"> | null;
   readonly threadCount: number;
   readonly lastActiveAt: string | null;
 }) {
@@ -1785,7 +2158,7 @@ function ImportRowMeta({
   // "just now" does not fit the fixed column, so collapse it.
   const age = relative === null ? "" : relative.suffix === null ? "now" : relative.value;
   return (
-    <span className="ml-auto grid shrink-0 grid-cols-[1rem_1rem_2.5rem_2.25rem] items-center gap-x-1 text-xs text-muted-foreground tabular-nums">
+    <span className="ml-auto grid shrink-0 grid-cols-[1rem_1rem_1rem_2.5rem_2.25rem] items-center gap-x-1 text-xs text-muted-foreground tabular-nums">
       <span className="flex size-4 items-center justify-center">
         {sources?.includes("claudeAgent") ? (
           <span role="img" aria-label="Claude Code">
@@ -1803,6 +2176,17 @@ function ImportRowMeta({
             <ProviderInstanceIcon
               driverKind={ProviderDriverKind.make("codex")}
               displayName="Codex"
+              iconClassName="size-3"
+            />
+          </span>
+        ) : null}
+      </span>
+      <span className="flex size-4 items-center justify-center">
+        {sources?.includes("cursor") ? (
+          <span role="img" aria-label="Cursor">
+            <ProviderInstanceIcon
+              driverKind={ProviderDriverKind.make("cursor")}
+              displayName="Cursor"
               iconClassName="size-3"
             />
           </span>

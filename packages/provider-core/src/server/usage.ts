@@ -118,6 +118,8 @@ export interface TranscriptUsageFormat<State> {
 /** A configured instance of the driver, its config already decoded by `driver.configSchema`. */
 export interface ProviderUsageInstance<Config> {
   readonly instanceId: ProviderInstanceId;
+  /** The instance's display name, when the user gave it one. */
+  readonly displayName?: string | undefined;
   /**
    * `undefined` when the stored config does not decode. The instance still has
    * history on disk, so readers that need no config read it anyway.
@@ -136,6 +138,8 @@ export interface ProviderUsageScan {
   readonly volumeId?: string;
   /** Overrides the server's host name in the source fingerprint, for account-wide sources. */
   readonly hostId?: string;
+  /** Names the source for people, e.g. the account an account-wide source belongs to. */
+  readonly label?: string;
   readonly status?: UsageSource["status"];
   readonly message?: string;
   readonly action?: UsageSource["action"];

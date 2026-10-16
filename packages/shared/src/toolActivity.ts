@@ -140,6 +140,32 @@ function extractToolCommand(data: Record<string, unknown> | undefined, title: st
   return extractCommandFromTitle(title);
 }
 
+/** Keys whose string values are file paths or file URIs in tool input. */
+export const TOOL_PATH_ARG_KEYS = [
+  "path",
+  "filePath",
+  "file_path",
+  "relativePath",
+  "filename",
+  "fileName",
+  "newPath",
+  "oldPath",
+  "old_path",
+  "new_path",
+  "targetFile",
+  "target_file",
+  "effectiveUri",
+  "cwd",
+  "workingDirectory",
+  "working_directory",
+  "directory",
+] as const;
+
+/**
+ * Keys that name the file a tool acts on. Deliberately narrower than
+ * TOOL_PATH_ARG_KEYS: a shell `cwd` or a search `directory` is not a file the
+ * tool touched, and counting it changes tool labels and grouping.
+ */
 const PATH_KEYS = [
   "path",
   "filePath",
@@ -150,6 +176,11 @@ const PATH_KEYS = [
   "newPath",
   "oldPath",
 ] as const;
+
+/** True when a flat tool-arg key carries a path that belongs under Paths blur. */
+export function isToolPathArgKey(key: string): boolean {
+  return (TOOL_PATH_ARG_KEYS as readonly string[]).includes(key);
+}
 
 function collectPaths(value: unknown, paths: string[], seen: Set<string>, depth: number): void {
   if (depth > 4 || paths.length >= 8) {

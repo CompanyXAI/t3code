@@ -344,7 +344,11 @@ export const make = Effect.gen(function* () {
     settings: ServerSettingsValue,
   ) {
     const entries: Array<
-      readonly [ProviderInstanceId, Pick<ProviderInstanceConfig, "config" | "environment">, boolean]
+      readonly [
+        ProviderInstanceId,
+        Pick<ProviderInstanceConfig, "config" | "environment" | "displayName">,
+        boolean,
+      ]
     > = Object.entries(settings.providerInstances)
       .filter(([, instance]) => instance.driver === driver.driverKind)
       .map(([id, instance]) => [ProviderInstanceId.make(id), instance, true] as const);
@@ -357,6 +361,7 @@ export const make = Effect.gen(function* () {
       Effect.fnUntraced(function* ([instanceId, instance, configured]) {
         const instanceConfig: ProviderUsageInstance<Config> = {
           instanceId,
+          ...(instance.displayName ? { displayName: instance.displayName } : {}),
           config: Option.getOrUndefined(decodeConfig(instance.config ?? {})),
           environment: yield* mergeProviderInstanceEnvironment(
             instance.environment,
@@ -582,6 +587,7 @@ export const make = Effect.gen(function* () {
     readonly dir: string;
     readonly volumeId: string;
     readonly hostId?: string;
+    readonly label?: string;
     readonly status?: UsageSource["status"];
     readonly message?: string;
     readonly action?: UsageSource["action"];
@@ -796,7 +802,18 @@ export const make = Effect.gen(function* () {
 
     for (const [
       index,
-      { provider, dir, volumeId, files, status, message, action, refreshing, hostId: sourceHostId },
+      {
+        provider,
+        dir,
+        volumeId,
+        files,
+        status,
+        message,
+        action,
+        refreshing,
+        hostId: sourceHostId,
+        label,
+      },
     ] of scannedDirs.entries()) {
       let scannedFiles = 0;
       let skippedFiles = 0;
@@ -851,6 +868,7 @@ export const make = Effect.gen(function* () {
           message ?? (files === null ? "No transcript directory on this environment." : null),
         ...(action ? { action } : {}),
         ...(refreshing ? { refreshing } : {}),
+        ...(label ? { label } : {}),
       });
     }
 

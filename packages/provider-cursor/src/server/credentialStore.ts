@@ -29,12 +29,21 @@ const encodeCredentials = Schema.encodeEffect(Credentials);
 export const makeCursorCredentialStore = Effect.fn("makeCursorCredentialStore")(function* (
   instanceId: ProviderInstanceId,
   legacyFile?: string,
+  /**
+   * Machine-wide SDK login (`~/.cursor/sdk/auth.json`). Copied into the instance
+   * secret store when empty so "Use existing" works like Codex's CLI session.
+   * Never deleted — other tools may still read it.
+   */
+  sharedSdkAuthFile?: string,
 ) {
   const credentials = yield* (yield* ProviderHost.ProviderHost).credentials("cursor", instanceId);
-  if (legacyFile !== undefined) {
-    const fileSystem = yield* FileSystem.FileSystem;
-    yield* Effect.gen(function* () {
-      const legacy = yield* fileSystem.readFileString(legacyFile).pipe(Effect.option);
+  const fileSystem = yield* FileSystem.FileSystem;
+  const importCredentialsFile = (
+    filePath: string,
+    options: { readonly deleteAfter: boolean; readonly label: string },
+  ) =>
+    Effect.gen(function* () {
+      const legacy = yield* fileSystem.readFileString(filePath).pipe(Effect.option);
       if (Option.isNone(legacy)) return;
       // A stored sign-in wins unless it is damaged; the SDK would ignore it anyway.
       const stored = yield* credentials.get;
@@ -49,12 +58,22 @@ export const makeCursorCredentialStore = Effect.fn("makeCursorCredentialStore")(
       ) {
         yield* credentials.set(new TextEncoder().encode(legacy.value));
       }
-      yield* fileSystem.remove(legacyFile);
+      if (options.deleteAfter) {
+        yield* fileSystem.remove(filePath);
+      }
     }).pipe(
       Effect.catch((error) =>
-        Effect.logWarning("Could not migrate legacy Cursor credentials", error),
+        Effect.logWarning(`Could not migrate ${options.label} Cursor credentials`, error),
       ),
     );
+  if (legacyFile !== undefined) {
+    yield* importCredentialsFile(legacyFile, { deleteAfter: true, label: "legacy" });
+  }
+  if (sharedSdkAuthFile !== undefined) {
+    yield* importCredentialsFile(sharedSdkAuthFile, {
+      deleteAfter: false,
+      label: "shared SDK",
+    });
   }
   const store: SdkCredentialStore = {
     load: () =>

@@ -677,6 +677,15 @@ export const SETTINGS_SEARCH_ITEMS = [
     providerSettingsOnly: true,
   },
   {
+    id: "usage-policies",
+    title: "Usage policies",
+    to: "/settings/providers",
+    searchTerms: [
+      "usage policy cap daily token allowlist openai free daily limit groups",
+    ],
+    providerSettingsOnly: true,
+  },
+  {
     id: "cursor-keychain-usage",
     title: "Cursor account usage",
     to: "/settings/providers",

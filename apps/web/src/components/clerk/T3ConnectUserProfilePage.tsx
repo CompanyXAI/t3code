@@ -14,6 +14,11 @@ import {
 } from "../../cloud/managedRelayState";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Button } from "../ui/button";
+import {
+  HOST_URL_REDACT_PROPS,
+  MACHINE_NAME_REDACT_PROPS,
+  RedactedSensitiveText,
+} from "../settings/RedactedSensitiveText";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
 import { toastManager } from "../ui/toast";
@@ -52,10 +57,19 @@ export function T3ConnectEnvironmentRow(props: {
         <div className="flex items-start gap-4">
           <div className="min-w-0 flex-1">
             <h3 className="truncate text-sm leading-4.5 font-medium text-foreground">
-              {environment.label}
+              <RedactedSensitiveText
+                value={environment.label}
+                {...MACHINE_NAME_REDACT_PROPS}
+                className="truncate text-sm font-medium text-foreground"
+              />
             </h3>
             <p className="mt-1 text-xs leading-4.5 text-muted-foreground">
-              {linkedAtLabel(environment.linkedAt)} · {endpointLabel(environment)}
+              {linkedAtLabel(environment.linkedAt)} ·{" "}
+              <RedactedSensitiveText
+                value={endpointLabel(environment)}
+                {...HOST_URL_REDACT_PROPS}
+                className="text-xs text-muted-foreground"
+              />
             </p>
           </div>
           <CollapsibleTrigger

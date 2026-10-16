@@ -5,6 +5,7 @@ import { ProviderInstanceIcon } from "./chat/ProviderInstanceIcon";
 import { cn } from "~/lib/utils";
 
 import { MiddleTruncate } from "./ui/middle-truncate";
+import { MACHINE_NAME_REDACT_PROPS, RedactedSensitiveText } from "./settings/RedactedSensitiveText";
 
 /**
  * Flip this while reviewing command-palette thread subtitles.
@@ -77,7 +78,11 @@ export function ThreadCommandSubtitle(props: {
           {props.environmentLabel ? (
             <>
               <CommandPaletteMetaDot />
-              <span className="shrink-0">{props.environmentLabel}</span>
+              <RedactedSensitiveText
+                value={props.environmentLabel}
+                {...MACHINE_NAME_REDACT_PROPS}
+                className="shrink-0 text-xs font-normal text-muted-foreground/70"
+              />
             </>
           ) : null}
         </span>

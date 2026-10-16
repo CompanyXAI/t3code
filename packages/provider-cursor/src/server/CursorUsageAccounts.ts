@@ -38,6 +38,7 @@ import {
   type CursorCredentialSource,
 } from "./accountCache.ts";
 import * as CursorAccountReader from "./CursorAccountReader.ts";
+import { makeCursorEnvironment, resolveCursorHomePath } from "./CursorHome.ts";
 
 const CURSOR_ACCOUNT_READ_ERROR = "Cursor account usage could not be read.";
 
@@ -49,13 +50,18 @@ const decodeCacheFile = Schema.decodeUnknownEffect(
 export class CursorUsageAccounts extends Context.Service<
   CursorUsageAccounts,
   {
-    /** This environment's Cursor account usage source, if it has one to report. */
+    /** Each Cursor instance's account usage source, read from its Cursor home. */
     readonly scan: (input: {
       /** From the same settings snapshot as the rest of the usage read. */
       readonly keychainUsageEnabled: boolean;
       readonly windowStartMs: number;
       readonly retentionCutoffMs: number;
       readonly awaitRefresh: boolean;
+      readonly instances: ReadonlyArray<{
+        readonly displayName?: string | undefined;
+        readonly config: { readonly homePath?: string | undefined } | undefined;
+        readonly environment: NodeJS.ProcessEnv;
+      }>;
     }) => Effect.Effect<ReadonlyArray<ProviderUsageScan>>;
     /** Waits for every cache write scheduled so far, as a restart would need. */
     readonly awaitPersisted: Effect.Effect<void>;
@@ -67,7 +73,6 @@ const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const host = yield* ProviderHost.ProviderHost;
   const accountReader = yield* CursorAccountReader.CursorAccountReader;
-  const hostEnvironment = yield* HostProcess.Environment;
   const platform = yield* HostProcess.Platform;
 
   const cachePath = path.join(host.paths.stateDir, CURSOR_ACCOUNT_CACHE_FILE_NAME);
@@ -225,7 +230,9 @@ const make = Effect.gen(function* () {
     windowStartMs: number,
     retentionStartMs: number,
     awaitRefresh: boolean,
+    label?: string,
   ) {
+    const named = label === undefined ? {} : { label };
     // No saved login means there is no account source to report, not a setup error.
     if (
       typeof credential === "string" &&
@@ -254,6 +261,7 @@ const make = Effect.gen(function* () {
     if (cache === undefined) {
       return {
         dir: authPath,
+        ...named,
         // Never combine a local fallback with another server's account-wide history.
         ...(refreshing
           ? { files: [], refreshing: true }
@@ -265,6 +273,7 @@ const make = Effect.gen(function* () {
     const source = `cursor-account:${cache.accountKey}`;
     return {
       dir: source,
+      ...named,
       hostId: "cursor.com",
       volumeId: cache.accountKey,
       files: [
@@ -280,58 +289,98 @@ const make = Effect.gen(function* () {
     } satisfies ProviderUsageScan;
   });
 
+  /** One instance's source; `environment` already points at its Cursor home. */
+  const instanceScan = Effect.fn("CursorUsageAccounts.instanceScan")(function* (input: {
+    readonly environment: NodeJS.ProcessEnv;
+    readonly label: string | undefined;
+    readonly keychainUsageEnabled: boolean;
+    readonly windowStartMs: number;
+    readonly retentionCutoffMs: number;
+    readonly awaitRefresh: boolean;
+  }): Effect.fn.Return<ReadonlyArray<ProviderUsageScan>> {
+    const { keychainUsageEnabled, windowStartMs, retentionCutoffMs, awaitRefresh, label } = input;
+    const hostEnvironment = input.environment;
+    const named = label === undefined ? {} : { label };
+    const home = yield* HostProcess.HomeDirectory;
+    const userHome =
+      (platform === "win32" ? hostEnvironment["USERPROFILE"] : hostEnvironment["HOME"]) || home;
+    const configHome = hostEnvironment["XDG_CONFIG_HOME"]?.trim();
+    const cursorHome =
+      platform === "darwin"
+        ? path.join(userHome, "Library", "Application Support")
+        : platform === "win32"
+          ? hostEnvironment["APPDATA"] || path.join(userHome, "AppData", "Roaming")
+          : configHome && path.isAbsolute(configHome)
+            ? configHome
+            : path.join(userHome, ".config");
+    const authPath =
+      platform === "darwin"
+        ? path.join(userHome, ".cursor", "auth.json")
+        : path.join(cursorHome, platform === "win32" ? "Cursor" : "cursor", "auth.json");
+    const credentialStore = hostEnvironment["AGENT_CLI_CREDENTIAL_STORE"];
+    const loginUnavailable =
+      Boolean(hostEnvironment["CURSOR_AUTH_TOKEN"]?.trim()) ||
+      Boolean(hostEnvironment["CURSOR_API_KEY"]?.trim()) ||
+      credentialStore === "memory";
+    const useKeychain = platform === "darwin" && credentialStore !== "file";
+    if (useKeychain && !loginUnavailable && !keychainUsageEnabled) {
+      return [
+        {
+          dir: authPath,
+          ...named,
+          volumeId: "",
+          files: null,
+          message: "Cursor account usage is off on this environment.",
+          action: "enableCursorKeychain",
+        },
+      ];
+    }
+    if (loginUnavailable) {
+      return [
+        {
+          dir: authPath,
+          ...named,
+          files: null,
+          message: "Cursor account history needs a Cursor CLI login on this server.",
+        },
+      ];
+    }
+    const source = yield* accountSource(
+      useKeychain ? { kind: "keychain" } : authPath,
+      authPath,
+      windowStartMs,
+      retentionCutoffMs,
+      awaitRefresh,
+      label,
+    );
+    return source === null ? [] : [source];
+  });
+
   const scan: CursorUsageAccounts["Service"]["scan"] = Effect.fn("CursorUsageAccounts.scan")(
-    function* ({ keychainUsageEnabled, windowStartMs, retentionCutoffMs, awaitRefresh }) {
+    function* (input) {
       const home = yield* HostProcess.HomeDirectory;
-      const userHome =
-        (platform === "win32" ? hostEnvironment["USERPROFILE"] : hostEnvironment["HOME"]) || home;
-      const configHome = hostEnvironment["XDG_CONFIG_HOME"]?.trim();
-      const cursorHome =
-        platform === "darwin"
-          ? path.join(userHome, "Library", "Application Support")
-          : platform === "win32"
-            ? hostEnvironment["APPDATA"] || path.join(userHome, "AppData", "Roaming")
-            : configHome && path.isAbsolute(configHome)
-              ? configHome
-              : path.join(userHome, ".config");
-      const authPath =
-        platform === "darwin"
-          ? path.join(userHome, ".cursor", "auth.json")
-          : path.join(cursorHome, platform === "win32" ? "Cursor" : "cursor", "auth.json");
-      const credentialStore = hostEnvironment["AGENT_CLI_CREDENTIAL_STORE"];
-      const loginUnavailable =
-        Boolean(hostEnvironment["CURSOR_AUTH_TOKEN"]?.trim()) ||
-        Boolean(hostEnvironment["CURSOR_API_KEY"]?.trim()) ||
-        credentialStore === "memory";
-      const useKeychain = platform === "darwin" && credentialStore !== "file";
-      if (useKeychain && !loginUnavailable && !keychainUsageEnabled) {
-        return [
-          {
-            dir: authPath,
-            volumeId: "",
-            files: null,
-            message: "Cursor account usage is off on this environment.",
-            action: "enableCursorKeychain",
-          },
-        ];
+      // Like T3's transcript readers: one source per distinct home, first
+      // instance wins. One account reached through two homes is merged by its
+      // account-wide fingerprint.
+      const seen = new Set<string>();
+      const homes: Array<{ environment: NodeJS.ProcessEnv; label: string | undefined }> = [];
+      for (const instance of input.instances) {
+        const config = instance.config ?? {};
+        const context = { platform, environment: instance.environment, home };
+        const key = resolveCursorHomePath(config, context);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        homes.push({
+          environment: makeCursorEnvironment(config, context),
+          label: instance.displayName,
+        });
       }
-      if (loginUnavailable) {
-        return [
-          {
-            dir: authPath,
-            files: null,
-            message: "Cursor account history needs a Cursor CLI login on this server.",
-          },
-        ];
-      }
-      const source = yield* accountSource(
-        useKeychain ? { kind: "keychain" } : authPath,
-        authPath,
-        windowStartMs,
-        retentionCutoffMs,
-        awaitRefresh,
+      const sources = yield* Effect.forEach(
+        homes,
+        ({ environment, label }) => instanceScan({ ...input, environment, label }),
+        { concurrency: "unbounded" },
       );
-      return source === null ? [] : [source];
+      return sources.flat();
     },
   );
 

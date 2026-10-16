@@ -1,7 +1,16 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 
 import { cn } from "../../lib/utils";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import {
+  isRedactionRevealed,
+  redactionCategoryFor,
+  redactionItemKey,
+  toggleRedactionItem,
+  updateRedactionState,
+  useRedactionState,
+  type RedactionCategory,
+} from "./redactionReveal";
 
 const REDACTED_TEXT_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789";
 
@@ -19,9 +28,37 @@ export function redactedPlaceholder(value: string): string {
   };
 
   return Array.from(value, (char) => {
-    if (char === "@" || char === "." || char === "-" || char === "_") return char;
+    // Keep structure for emails, hosts, file paths, and URLs when blurred.
+    if (
+      char === "@" ||
+      char === "." ||
+      char === "-" ||
+      char === "_" ||
+      char === "/" ||
+      char === "\\" ||
+      char === ":"
+    ) {
+      return char;
+    }
     return nextChar();
   }).join("");
+}
+
+/**
+ * Non-interactive redaction for places where a reveal button cannot sit (inside a
+ * label, link or button): the placeholder until the item or its category is
+ * revealed via the header controls.
+ */
+export function useRedactedDisplay(
+  category: RedactionCategory,
+  value: string,
+): { readonly revealed: boolean; readonly display: string } {
+  const revealed = isRedactionRevealed(
+    useRedactionState(),
+    category,
+    redactionItemKey(category, value.trim()),
+  );
+  return { revealed, display: revealed ? value : redactedPlaceholder(value) };
 }
 
 export function RedactedSensitiveText(props: {
@@ -30,9 +67,13 @@ export function RedactedSensitiveText(props: {
   readonly revealTooltip: string;
   readonly hideTooltip: string;
   readonly className?: string;
+  /** Defaults to the category implied by the prop set's aria label. */
+  readonly category?: RedactionCategory;
 }) {
-  const [revealed, setRevealed] = useState(false);
   const value = props.value?.trim();
+  const category = props.category ?? redactionCategoryFor(props.ariaLabel);
+  const itemKey = redactionItemKey(category, value ?? "");
+  const revealed = isRedactionRevealed(useRedactionState(), category, itemKey);
   const redacted = useMemo(() => (value ? redactedPlaceholder(value) : ""), [value]);
 
   if (!value) return null;
@@ -48,7 +89,9 @@ export function RedactedSensitiveText(props: {
               revealed ? "text-muted-foreground" : "select-none text-muted-foreground blur-xs",
               props.className,
             )}
-            onClick={() => setRevealed((current) => !current)}
+            onClick={() =>
+              updateRedactionState((state) => toggleRedactionItem(state, category, itemKey))
+            }
             aria-label={props.ariaLabel}
           >
             {revealed ? value : redacted}
@@ -59,3 +102,24 @@ export function RedactedSensitiveText(props: {
     </Tooltip>
   );
 }
+
+/** Click-to-reveal props for PC names, matching the email pattern. */
+export const MACHINE_NAME_REDACT_PROPS = {
+  ariaLabel: "Toggle machine name visibility",
+  revealTooltip: "Click to reveal machine name",
+  hideTooltip: "Click to hide machine name",
+} as const;
+
+/** Click-to-reveal props for hostnames and remote URLs (*.ts.net, etc.). */
+export const HOST_URL_REDACT_PROPS = {
+  ariaLabel: "Toggle host visibility",
+  revealTooltip: "Click to reveal host",
+  hideTooltip: "Click to hide host",
+} as const;
+
+/** Click-to-reveal props for local file paths (env files, repo roots, etc.). */
+export const PATH_REDACT_PROPS = {
+  ariaLabel: "Toggle path visibility",
+  revealTooltip: "Click to reveal path",
+  hideTooltip: "Click to hide path",
+} as const;

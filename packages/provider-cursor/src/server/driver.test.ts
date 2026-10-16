@@ -16,6 +16,7 @@ import { CursorDriver } from "./driver.ts";
 import * as CursorAgentSdk from "./CursorAgentSdk.ts";
 import * as CursorSdk from "./CursorSdk.ts";
 import * as CursorKeychain from "./CursorKeychain.ts";
+import { CursorAccountIdentity } from "./profileUsage.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -29,6 +30,13 @@ const layerTest = TestProviderHost.layer({ runBackgroundWork: false }).pipe(
   Layer.provideMerge(
     Layer.mock(CursorAgentSdk.CursorAgentSdkRunner)({
       open: () => Effect.die("Maintenance resolution must not open a Cursor session"),
+    }),
+  ),
+  // Never run the real cursor-agent: the guard sees a signed-out CLI login.
+  Layer.provideMerge(
+    Layer.succeed(CursorAccountIdentity, {
+      sdkEmail: async () => "cursor@example.com",
+      cliStatus: async () => "Not logged in",
     }),
   ),
   Layer.provideMerge(

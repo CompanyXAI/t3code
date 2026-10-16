@@ -10,6 +10,10 @@ import {
   AlertDialogTitle,
 } from "../ui/alert-dialog";
 import { Button, InlineButton } from "../ui/button";
+import {
+  MACHINE_NAME_REDACT_PROPS,
+  RedactedSensitiveText,
+} from "../settings/RedactedSensitiveText";
 import { useT3ConnectAccountPage } from "./T3ConnectAccountPages";
 
 /**
@@ -43,7 +47,17 @@ export function RemoveT3ConnectEnvironmentDialog({
       >
         <AlertDialogPopup>
           <AlertDialogHeader>
-            <AlertDialogTitle>Remove {shownLabel} from this device?</AlertDialogTitle>
+            <AlertDialogTitle>
+              Remove{" "}
+              {shownLabel ? (
+                <RedactedSensitiveText
+                  value={shownLabel}
+                  {...MACHINE_NAME_REDACT_PROPS}
+                  className="inline text-inherit"
+                />
+              ) : null}{" "}
+              from this device?
+            </AlertDialogTitle>
             <AlertDialogDescription>
               This forgets its pairing, credentials, and cached threads here.
             </AlertDialogDescription>

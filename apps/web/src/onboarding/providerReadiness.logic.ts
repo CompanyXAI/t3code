@@ -1,6 +1,9 @@
 import {
   ClaudeSettings,
   CodexSettings,
+  defaultInstanceIdForDriver,
+  ProviderDriverKind,
+  ProviderInstanceId,
   type ExecutionEnvironmentPlatformOs,
   type ServerProvider,
   type ServerSettings,
@@ -33,6 +36,51 @@ function quoteProviderBinary(
   return fallback;
 }
 
+/**
+ * Cursor rows for the welcome Agents step. Settings > Providers is the source
+ * of truth: Cursor has no default slot, so an unconfigured probe for instance
+ * id `cursor` must not appear beside real accounts. When nothing is configured
+ * yet, return one placeholder so the step can offer Set up.
+ */
+export function selectOnboardingCursorInstances(
+  providers: ReadonlyArray<ServerProvider> | null | undefined,
+  settings: Pick<ServerSettings, "providerInstances"> | null | undefined,
+): ReadonlyArray<{
+  readonly instanceId: ProviderInstanceId;
+  readonly provider: ServerProvider | undefined;
+}> {
+  const defaultId = defaultInstanceIdForDriver(ProviderDriverKind.make("cursor"));
+  const byId = new Map(
+    (providers ?? [])
+      .filter((provider) => provider.driver === "cursor")
+      .map((provider) => [String(provider.instanceId), provider] as const),
+  );
+
+  const configured: Array<{
+    instanceId: ProviderInstanceId;
+    provider: ServerProvider | undefined;
+  }> = [];
+  for (const [rawId, instance] of Object.entries(settings?.providerInstances ?? {})) {
+    if (instance.driver !== "cursor") continue;
+    configured.push({
+      instanceId: ProviderInstanceId.make(rawId),
+      provider: byId.get(rawId),
+    });
+  }
+  if (configured.length > 0) return configured;
+
+  return [
+    {
+      instanceId: defaultId,
+      provider: byId.get(String(defaultId)),
+    },
+  ];
+}
+
+/** Codex lists every configured ChatGPT account in the welcome Agents step. */
+export function isMultiInstanceOnboardingDriver(driver: string): boolean {
+  return driver === "codex";
+}
 export function getOnboardingProviderState(provider: ServerProvider | undefined) {
   if (provider === undefined) return "checking";
   if (!provider.enabled || provider.status === "disabled") return "disabled";

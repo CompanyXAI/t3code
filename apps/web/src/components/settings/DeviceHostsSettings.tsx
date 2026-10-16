@@ -40,6 +40,7 @@ import { DeviceHostEditor } from "./DeviceHostEditor";
 import { useHostConnectionChecks } from "./useHostConnectionChecks";
 import { deviceHostConnectionKey } from "./deviceHostConnectionChecks";
 import { settingsScopeEnvironmentLabel, settingsScopeEnvironmentLabels } from "./settingsScopeAxis";
+import { MACHINE_NAME_REDACT_PROPS, RedactedSensitiveText } from "./RedactedSensitiveText";
 
 export function DeviceHostsSettings(props: { environmentId: EnvironmentId | null }) {
   const { scope, environments, connectedEnvironments } = useSettingsScope();
@@ -172,13 +173,17 @@ export function DeviceHostsSettings(props: { environmentId: EnvironmentId | null
                     id={`device-hosts-${environment.environmentId}`}
                     title={
                       <>
-                        <span className="block max-w-64 truncate">
-                          {environment.labels.primary}
-                        </span>
+                        <RedactedSensitiveText
+                          value={environment.labels.primary}
+                          {...MACHINE_NAME_REDACT_PROPS}
+                          className="block max-w-64 truncate"
+                        />
                         {environment.labels.secondary ? (
-                          <span className="block max-w-64 truncate text-xs font-normal text-muted-foreground">
-                            {environment.labels.secondary}
-                          </span>
+                          <RedactedSensitiveText
+                            value={environment.labels.secondary}
+                            {...MACHINE_NAME_REDACT_PROPS}
+                            className="block max-w-64 truncate text-xs font-normal text-muted-foreground"
+                          />
                         ) : null}
                       </>
                     }

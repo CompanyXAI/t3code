@@ -12,6 +12,11 @@ import { cn } from "~/lib/utils";
 import type { EnvironmentPresentation } from "~/state/environments";
 import { isDesktopLocalConnectionTarget } from "~/connection/desktopLocal";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
+import {
+  HOST_URL_REDACT_PROPS,
+  MACHINE_NAME_REDACT_PROPS,
+  RedactedSensitiveText,
+} from "./RedactedSensitiveText";
 
 export function formatDesktopSshTarget(target: DesktopSshEnvironmentTarget): string {
   const authority = target.username ? `${target.username}@${target.hostname}` : target.hostname;
@@ -89,8 +94,24 @@ export function EnvironmentRow({
     >
       <EnvironmentMachineIcon aria-hidden kind={kind} className="size-4 text-muted-foreground" />
       <div className="min-w-0">
-        <p className="truncate text-sm font-medium text-foreground">{label}</p>
-        <div className="truncate text-xs text-muted-foreground">{subtitle}</div>
+        <p className="truncate text-sm font-medium text-foreground">
+          <RedactedSensitiveText
+            value={label}
+            {...MACHINE_NAME_REDACT_PROPS}
+            className="truncate text-sm font-medium text-foreground"
+          />
+        </p>
+        <div className="truncate text-xs text-muted-foreground">
+          {typeof subtitle === "string" ? (
+            <RedactedSensitiveText
+              value={subtitle}
+              {...HOST_URL_REDACT_PROPS}
+              className="truncate text-xs text-muted-foreground"
+            />
+          ) : (
+            subtitle
+          )}
+        </div>
         {below}
       </div>
       <div className="flex shrink-0 items-center gap-1">{children}</div>

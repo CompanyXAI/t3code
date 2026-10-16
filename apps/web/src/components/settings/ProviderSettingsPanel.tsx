@@ -47,6 +47,7 @@ import {
   useToggleEnvironmentModelFavorite,
 } from "../../hooks/useSettings";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
+import { MACHINE_NAME_REDACT_PROPS, RedactedSensitiveText } from "./RedactedSensitiveText";
 import { cn } from "../../lib/utils";
 import { resolveAppModelSelectionState } from "../../modelSelection";
 import {
@@ -94,6 +95,7 @@ import { AddProviderInstanceDialog } from "./AddProviderInstanceDialog";
 import { ExpandableText } from "./ExpandableText";
 import { ProviderInstanceCard } from "./ProviderInstanceCard";
 import { UsageProviderSettings } from "./UsageProviderSettings";
+import { UsagePoliciesSettings } from "./UsagePoliciesSettings";
 import { ProviderSetupSection, readAntigravityAuthMethod } from "./ProviderSetupSection";
 import { ProviderAuthenticationSection } from "./ProviderAuthenticationSection";
 import { CodexSetupSection, CodexManagedRuntimeFields } from "./CodexSetupSection";
@@ -402,7 +404,11 @@ function ProviderSettingsPanelContent(target: ProviderSettingsTarget) {
                         className="size-3.5 shrink-0"
                         aria-hidden
                       />
-                      <span className="max-w-40 truncate">{environment.label}</span>
+                      <RedactedSensitiveText
+                        value={environment.label}
+                        {...MACHINE_NAME_REDACT_PROPS}
+                        className="max-w-40 truncate"
+                      />
                       {environment.connection.phase !== "connected" ? (
                         <ConnectionStatusDot
                           dotClassName={connectionPhaseDotClassName(environment.connection.phase)}
@@ -1248,6 +1254,8 @@ export function EnvironmentProviderSettings({
         cursorKeychainUsageEnabled={settings.cursorKeychainUsageEnabled}
         readOnly={readOnly}
       />
+
+      <UsagePoliciesSettings readOnly={readOnly} />
 
       <SettingsSection title="Advanced">
         <SettingsRow

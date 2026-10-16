@@ -89,6 +89,7 @@ import {
   environmentTransportLabel,
   formatDesktopSshTarget,
 } from "./EnvironmentRow";
+import { HOST_URL_REDACT_PROPS, RedactedSensitiveText } from "./RedactedSensitiveText";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
 import { LoadBalancingSettings } from "./LoadBalancingSettings";
 import { GitHubRoutingSettings } from "./GitHubRoutingSettings";
@@ -1586,8 +1587,8 @@ function SavedBackendListRow({
       (lastDescriptor === undefined ? null : { environment: lastDescriptor }),
   );
   const routeCount = connectionRoutes(environment.entry).length;
+  const transportLabel = environmentTransportLabel(environment, connectedTarget);
   const subtitleText = [
-    environmentTransportLabel(environment, connectedTarget),
     resumingServerUpdate ? "Restarting" : status.text,
     enabled && versionMismatch ? serverVersion : null,
   ]
@@ -1638,7 +1639,15 @@ function SavedBackendListRow({
                 />
               }
             >
-              {subtitleText}
+              <span className="inline-flex min-w-0 items-center gap-1">
+                <RedactedSensitiveText
+                  value={transportLabel}
+                  {...HOST_URL_REDACT_PROPS}
+                  className="truncate text-xs text-muted-foreground"
+                />
+                {subtitleText ? <span aria-hidden>·</span> : null}
+                {subtitleText ? <span className="truncate">{subtitleText}</span> : null}
+              </span>
             </TooltipTrigger>
             <TooltipPopup side="top" className="whitespace-pre-wrap">
               {statusTooltip}

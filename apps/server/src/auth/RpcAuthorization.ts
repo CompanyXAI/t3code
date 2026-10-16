@@ -115,6 +115,7 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.serverReportClientActivity]: AuthOrchestrationReadScope,
   [WS_METHODS.serverReportHostPowerState]: AuthEnvironmentMaintainScope,
   [WS_METHODS.serverGetBackgroundPolicy]: AuthOrchestrationReadScope,
+  [WS_METHODS.serverGetUsagePolicyStatus]: AuthOrchestrationReadScope,
   [WS_METHODS.scheduledTasksList]: AuthOrchestrationReadScope,
   [WS_METHODS.scheduledTasksSubscribe]: AuthOrchestrationReadScope,
   [WS_METHODS.secretsAnswerRequest]: AuthOrchestrationOperateScope,
@@ -161,6 +162,18 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.filesystemGetMetadata]: AuthFilesystemReadScope,
   [WS_METHODS.agentSessionsScan]: AuthOrchestrationReadScope,
   [WS_METHODS.agentSessionsImport]: AuthOrchestrationOperateScope,
+  // Cursor's agents run on the user's Cursor accounts: listing and following
+  // them is a read, starting, steering or stopping one acts on the account.
+  [WS_METHODS.cursorAgentsList]: AuthOrchestrationReadScope,
+  [WS_METHODS.cursorAgentsFollow]: AuthOrchestrationReadScope,
+  [WS_METHODS.cursorAgentsLaunch]: AuthOrchestrationOperateScope,
+  [WS_METHODS.cursorAgentsFollowUp]: AuthOrchestrationOperateScope,
+  [WS_METHODS.cursorAgentsStop]: AuthOrchestrationOperateScope,
+  [WS_METHODS.cursorAgentsApprovals]: AuthOrchestrationReadScope,
+  [WS_METHODS.cursorAgentsRespondApproval]: AuthOrchestrationOperateScope,
+  [WS_METHODS.cursorAgentsHookSetup]: AuthOrchestrationOperateScope,
+  [WS_METHODS.cursorAgentsMachine]: AuthOrchestrationOperateScope,
+  [WS_METHODS.cursorAgentsProjectHooks]: AuthOrchestrationOperateScope,
   [WS_METHODS.assetsCreateUrl]: AuthOrchestrationReadScope,
   [WS_METHODS.assetsPersistChatAttachments]: AuthOrchestrationOperateScope,
   [WS_METHODS.attachmentsCreateUploadUrl]: AuthOrchestrationOperateScope,
@@ -215,6 +228,7 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.subscribeServerLifecycle]: AuthOrchestrationReadScope,
   [WS_METHODS.subscribeAuthAccess]: AuthAccessReadScope,
   [WS_METHODS.subscribeBackgroundPolicy]: AuthOrchestrationReadScope,
+  [WS_METHODS.subscribeUsagePolicyStatus]: AuthOrchestrationReadScope,
 } as const satisfies Readonly<Record<WsRpcMethod, AuthEnvironmentScope>>;
 
 export function requiredScopeForRpcMethod(method: string): AuthEnvironmentScope {

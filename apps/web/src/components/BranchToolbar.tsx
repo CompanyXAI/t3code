@@ -26,6 +26,9 @@ import {
 
 import { useComposerDraftStore, type DraftId } from "../composerDraftStore";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
+import { MACHINE_NAME_REDACT_PROPS, RedactedSensitiveText } from "./settings/RedactedSensitiveText";
+import { redactFreeText } from "./settings/redactFreeText";
+import { useRedactionState } from "./settings/redactionReveal";
 import { useProject, useThreadShell, useThreadShellsForProjectRefs } from "../state/entities";
 import {
   type EnvMode,
@@ -99,6 +102,8 @@ interface BranchToolbarProps {
   onComposerFocusRequest?: () => void;
   availableEnvironments?: readonly EnvironmentOption[];
   onEnvironmentChange?: (environmentId: EnvironmentId) => void;
+  /** Extra tooltip line for the machine picker, e.g. that Cloud ignores it. */
+  machineHint?: string | undefined;
   composerControlsHostRef?: (element: HTMLDivElement | null) => void;
   contextStripVisible?: boolean;
 }
@@ -180,6 +185,7 @@ const RunContextSelector = memo(function RunContextSelector({
   onUsePreviousWorktree,
 }: RunContextSelectorProps) {
   const composerFloatingLayerProps = useComposerMenuProps();
+  const redaction = useRedactionState();
   const activeEnvironment = useMemo(
     () => availableEnvironments?.find((env) => env.environmentId === environmentId) ?? null,
     [availableEnvironments, environmentId],
@@ -203,6 +209,17 @@ const RunContextSelector = memo(function RunContextSelector({
     forceNewWorktree || (effectiveEnvMode === "worktree" && !activeWorktreePath)
       ? null
       : (activeWorktreePath ?? workspaceRoot);
+  // The mode label lives in the tooltip; the row shows icon plus device name.
+  const deviceName = activeEnvironment?.label ?? null;
+  const workspaceTooltip = [
+    workspaceLabel,
+    ...(deviceName ? [`Device: ${deviceName}`] : []),
+    ...(workspacePath ? [`${activeWorktreePath ? "Worktree" : "Path"}: ${workspacePath}`] : []),
+  ]
+    .map((line) =>
+      redactFreeText(line, redaction, { machines: deviceName ? [deviceName] : [], accounts: [] }),
+    )
+    .join("\n");
   const handleContextMenu = (event: ReactMouseEvent) => {
     if (isPanel && workspacePath) {
       showWorkspaceContextMenu(event, workspacePath);
@@ -219,12 +236,8 @@ const RunContextSelector = memo(function RunContextSelector({
           }
         />
       </TooltipTrigger>
-      <TooltipPopup>
-        {isPanel
-          ? forceNewWorktree
-            ? "Each model starts in its own worktree."
-            : (workspacePath ?? workspaceLabel)
-          : workspaceLabel}
+      <TooltipPopup className="whitespace-pre-line">
+        {forceNewWorktree ? "Each model starts in its own worktree." : workspaceTooltip}
       </TooltipPopup>
     </Tooltip>
   );
@@ -246,7 +259,19 @@ const RunContextSelector = memo(function RunContextSelector({
             />
           )}
         </TooltipTrigger>
-        <TooltipPopup>{autoEnvironmentLabel ?? activeEnvironment?.label ?? "Run on"}</TooltipPopup>
+        <TooltipPopup>
+          {autoEnvironmentLabel ? (
+            autoEnvironmentLabel
+          ) : activeEnvironment?.label ? (
+            <RedactedSensitiveText
+              value={activeEnvironment.label}
+              {...MACHINE_NAME_REDACT_PROPS}
+              className="text-xs font-normal text-inherit"
+            />
+          ) : (
+            "Run on"
+          )}
+        </TooltipPopup>
       </Tooltip>
       {workspaceIcon}
     </span>
@@ -257,8 +282,19 @@ const RunContextSelector = memo(function RunContextSelector({
     <>
       {icon}
       <ComposerContextLabel displayMode={displayMode}>
-        {autoEnvironmentLabel ??
-          (showEnvironmentIndicator ? (activeEnvironment?.label ?? "Run on") : workspaceLabel)}
+        {autoEnvironmentLabel
+          ? autoEnvironmentLabel
+          : showEnvironmentIndicator
+            ? activeEnvironment?.label
+              ? redactFreeText(activeEnvironment.label, redaction, {
+                  machines: [activeEnvironment.label],
+                  accounts: [],
+                })
+              : "Run on"
+            : deviceName
+              ? // Plain text: the trigger is a button and must not nest the reveal button.
+                redactFreeText(deviceName, redaction, { machines: [deviceName], accounts: [] })
+              : "This PC"}
       </ComposerContextLabel>
     </>
   );
@@ -353,7 +389,11 @@ const RunContextSelector = memo(function RunContextSelector({
                   >
                     <span className="flex min-w-0 items-center gap-1.5">
                       <EnvironmentMachineIcon kind={env.machine} className="size-3" />
-                      <span className="min-w-0 truncate">{env.label}</span>
+                      <RedactedSensitiveText
+                        value={env.label}
+                        {...MACHINE_NAME_REDACT_PROPS}
+                        className="min-w-0 truncate text-sm font-normal"
+                      />
                     </span>
                   </MenuRadioItem>
                 ))}
@@ -614,6 +654,7 @@ export const BranchToolbar = memo(function BranchToolbar({
   onComposerFocusRequest,
   availableEnvironments,
   onEnvironmentChange,
+  machineHint,
   composerControlsHostRef,
   contextStripVisible = true,
 }: BranchToolbarProps) {
@@ -804,6 +845,7 @@ export const BranchToolbar = memo(function BranchToolbar({
                 envLocked={envLocked}
                 environmentId={environmentId}
                 availableEnvironments={availableEnvironments}
+                machineHint={machineHint}
                 {...(showEnvironmentPicker && onEnvironmentChange ? { onEnvironmentChange } : {})}
               />
               {showGitControls ? (

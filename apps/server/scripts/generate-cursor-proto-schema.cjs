@@ -1,0 +1,125 @@
+#!/usr/bin/env node
+/**
+ * Extracts the agent/v1 protobuf schemas Cursor's own cursor-agent bundle carries
+ * (protobuf-es "compact" descriptors: `static $(){return["Name|1 field 9|2 other #0", Ref0]}`)
+ * and writes the subset reachable from ToolCall / ConversationStep / turns to
+ * apps/server/src/project/cursorAgentProtoSchema.generated.ts.
+ *
+ * Usage: node apps/server/scripts/generate-cursor-proto-schema.cjs <cursor-agent version dir>
+ * Field names and nesting come only from the bundle; nothing is guessed.
+ */
+const fs = require("node:fs");
+const path = require("node:path");
+
+const dir = process.argv[2];
+if (!dir) throw new Error("pass the cursor-agent version directory");
+const files = fs.readdirSync(dir).filter((f) => f.endsWith(".js"));
+
+const modules = new Map(); // path -> body
+for (const file of files) {
+  const text = fs.readFileSync(path.join(dir, file), "utf8");
+  const re = /"([^"\s]+?\.(?:js|mjs|cjs))"(?::function)?\((\w+),(\w+),(\w+)\)\{/g;
+  const heads = [];
+  for (let m; (m = re.exec(text)); ) heads.push({ key: m[1], start: m.index, req: m[4], exp: m[3] });
+  for (let i = 0; i < heads.length; i++) {
+    const end = i + 1 < heads.length ? heads[i + 1].start : text.length;
+    if (!modules.has(heads[i].key)) modules.set(heads[i].key, { ...heads[i], body: text.slice(heads[i].start, end) });
+  }
+}
+
+const parsed = new Map(); // module key -> { exports, requires, classes }
+function parseModule(key) {
+  if (parsed.has(key)) return parsed.get(key);
+  const mod = modules.get(key);
+  const out = { exports: new Map(), requires: new Map(), classes: new Map() };
+  parsed.set(key, out);
+  if (!mod) return out;
+  const { body } = mod;
+  const d = new RegExp(`\\b${mod.req}\\.d\\(${mod.exp},\\{([^}]*)\\}\\)`).exec(body);
+  if (d) for (const m of d[1].matchAll(/([\w$]+):\(\)=>([\w$]+)/g)) out.exports.set(m[1], m[2]);
+  for (const m of body.matchAll(new RegExp(`([\\w$]+)=${mod.req}\\("([^"]+)"\\)`, "g"))) out.requires.set(m[1], m[2]);
+  const classRe = /class ([\w$]+) extends [\w$.]+\{/g;
+  const starts = [];
+  for (let m; (m = classRe.exec(body)); ) starts.push({ id: m[1], at: m.index });
+  for (let i = 0; i < starts.length; i++) {
+    const seg = body.slice(starts[i].at, i + 1 < starts.length ? starts[i + 1].at : body.length);
+    const s = /static \$\(\)\{return\["([^"]+)"((?:,[\w$.]+)*)\]/.exec(seg);
+    if (s) out.classes.set(starts[i].id, { schema: s[1], refs: s[2] ? s[2].slice(1).split(",") : [] });
+  }
+  // enums: `X=...setEnumType(X,"agent.v1.Name"` or proto3.util.setEnumType
+  for (const m of body.matchAll(/setEnumType\(([\w$]+),"([\w.]+)"/g)) out.classes.set(m[1], { enumName: m[2].split(".").pop() });
+  return out;
+}
+
+function resolveRef(moduleKey, ref) {
+  const mod = parseModule(moduleKey);
+  if (ref.includes(".")) {
+    const [alias, exported] = ref.split(".");
+    const target = mod.requires.get(alias);
+    if (!target) return null;
+    const tmod = parseModule(target);
+    const local = tmod.exports.get(exported);
+    return local ? resolveRef(target, local) : null;
+  }
+  const cls = mod.classes.get(ref);
+  if (!cls) return null;
+  if (cls.enumName) return { enum: cls.enumName };
+  return { name: cls.schema.split("|")[0], moduleKey, cls };
+}
+
+const types = new Map(); // name -> { fields }
+const nameIndex = new Map(); // name -> { moduleKey, cls }
+for (const key of modules.keys()) {
+  for (const [, cls] of parseModule(key).classes) {
+    if (cls.schema && !nameIndex.has(cls.schema.split("|")[0])) nameIndex.set(cls.schema.split("|")[0], { moduleKey: key, cls });
+  }
+}
+function build(name) {
+  if (types.has(name)) return;
+  const entry = nameIndex.get(name);
+  if (!entry) return;
+  const fields = {};
+  types.set(name, fields);
+  const [, ...parts] = entry.cls.schema.split("|");
+  for (const part of parts) {
+    const [no, fieldName, kindRaw, oneof] = part.split(" ");
+    const repeated = kindRaw.endsWith("*");
+    const kind = kindRaw.replace(/[*?]$/, "");
+    const field = { name: fieldName };
+    if (repeated) field.repeated = true;
+    if (oneof) field.oneof = oneof;
+    if (kind.startsWith("#")) {
+      const ref = entry.cls.refs[Number(kind.slice(1))];
+      const target = ref ? resolveRef(entry.moduleKey, ref) : null;
+      if (target?.enum) field.enum = target.enum;
+      else if (target?.name) {
+        field.message = target.name;
+        build(target.name);
+      } else field.unresolved = true;
+    } else field.scalar = Number(kind);
+    fields[no] = field;
+  }
+}
+for (const root of [
+  "ConversationStateStructure",
+  "ConversationTurnStructure",
+  "AgentConversationTurnStructure",
+  "ShellConversationTurnStructure",
+  "ConversationStep",
+  "UserMessage",
+  "AssistantMessage",
+  "ThinkingMessage",
+  "ToolCall",
+]) build(root);
+
+const out = Object.fromEntries([...types.entries()].sort(([a], [b]) => a.localeCompare(b)));
+const target = path.join(__dirname, "..", "src", "project", "cursorAgentProtoSchema.generated.ts");
+fs.writeFileSync(
+  target,
+  `// Generated by apps/server/scripts/generate-cursor-proto-schema.cjs from cursor-agent ${path.basename(dir)}. Do not edit.\n` +
+    "/* oxlint-disable */\n" +
+    `export const CURSOR_AGENT_PROTO_TYPES: Readonly<Record<string, Readonly<Record<string, CursorProtoField>>>> = ${JSON.stringify(out, (_k, v) => (v && typeof v === "object" && "scalar" in v && !Number.isFinite(v.scalar) ? { name: v.name, unresolved: true } : v))};\n\n` +
+    "export interface CursorProtoField {\n  readonly name: string;\n  readonly repeated?: boolean;\n  readonly oneof?: string;\n  readonly message?: string;\n  readonly enum?: string;\n  readonly scalar?: number;\n  readonly unresolved?: boolean;\n}\n",
+);
+const unresolved = Object.values(out).flatMap((f) => Object.values(f)).filter((f) => f.unresolved).length;
+console.log(`types=${types.size} unresolvedRefs=${unresolved} roots-missing=${["ToolCall", "ConversationStep"].filter((r) => !types.has(r)).join(",")}`);

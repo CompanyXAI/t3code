@@ -64,6 +64,12 @@ vi.mock("../../keybindings", () => ({
   isOpenFavoriteEditorShortcut: () => true,
   shortcutLabelForCommand: () => "Ctrl+O",
 }));
+// RedactedSensitiveText wraps values in a hover Tooltip whose floating-ui effect
+// needs DOM globals (Element) that react-test-renderer's node env lacks.
+vi.mock("../settings/RedactedSensitiveText", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../settings/RedactedSensitiveText")>()),
+  RedactedSensitiveText: ({ value }: { value?: string | null }) => value ?? null,
+}));
 vi.mock("../ui/button", () => ({ Button: "button" }));
 vi.mock("../ui/group", () => ({ Group: "div", GroupSeparator: "span" }));
 vi.mock("../ui/menu", () => ({

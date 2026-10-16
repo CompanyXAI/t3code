@@ -111,6 +111,15 @@ export interface UsageContractMismatch {
   readonly contractVersion: number;
 }
 
+/** Usage of one named account-wide source, such as one Cursor account. */
+export interface AccountTotals {
+  readonly provider: UsageProviderKind;
+  readonly sourcePath: string;
+  readonly label: string;
+  readonly costUsd: number;
+  readonly totalTokens: number;
+}
+
 export interface MergedUsage {
   readonly costUsd: number;
   readonly uncachedInputTokens: number;
@@ -122,6 +131,8 @@ export interface MergedUsage {
   readonly records: number;
   readonly sessions: number;
   readonly providers: readonly ProviderTotals[];
+  /** Per named source (account), largest cost first. */
+  readonly accounts: readonly AccountTotals[];
   readonly models: readonly ModelTotals[];
   readonly daily: readonly DailyTotals[];
   readonly hourly: readonly HourlyTotals[];
@@ -329,6 +340,7 @@ const EMPTY_MERGED: MergedUsage = {
   records: 0,
   sessions: 0,
   providers: [],
+  accounts: [],
   models: [],
   daily: [],
   hourly: [],
@@ -435,6 +447,15 @@ export function mergeUsage(
     }
   >();
   const contributingEnvironments: EnvironmentId[] = [];
+  const accountLabels = new Map<string, string>();
+  for (const environment of current) {
+    for (const source of environment.summary.sources) {
+      if (source.label === undefined) continue;
+      const { provider, resolvedHomePath } = source.fingerprint;
+      accountLabels.set(`${provider} ${resolvedHomePath}`, source.label);
+    }
+  }
+  const accountAccumulator = new Map<string, AccountTotals>();
 
   for (const environment of current) {
     const { buckets, sessionsByProvider } = ownedContribution(
@@ -491,6 +512,21 @@ export function mergeUsage(
       provider.totalTokens += tokens;
       provider.records += bucket.records;
       providerAccumulator.set(bucket.provider, provider);
+
+      if (bucket.sourcePath !== undefined) {
+        const accountKey = `${bucket.provider} ${bucket.sourcePath}`;
+        const label = accountLabels.get(accountKey);
+        if (label !== undefined) {
+          const account = accountAccumulator.get(accountKey);
+          accountAccumulator.set(accountKey, {
+            provider: bucket.provider,
+            sourcePath: bucket.sourcePath,
+            label,
+            costUsd: (account?.costUsd ?? 0) + bucket.costUsd,
+            totalTokens: (account?.totalTokens ?? 0) + tokens,
+          });
+        }
+      }
 
       const modelKey = `${bucket.provider} ${bucket.model}`;
       const model = modelAccumulator.get(modelKey) ?? {
@@ -612,6 +648,7 @@ export function mergeUsage(
     records,
     sessions,
     providers,
+    accounts: [...accountAccumulator.values()].sort((a, b) => b.costUsd - a.costUsd),
     models,
     daily,
     hourly,

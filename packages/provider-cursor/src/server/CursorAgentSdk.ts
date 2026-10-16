@@ -2,7 +2,11 @@ import type {
   AgentMessage,
   AgentOptions,
   InteractionUpdate,
+  ListResult,
+  ListRunsOptions,
+  Run,
   RunResult,
+  SDKMessage,
   SDKUserMessage,
   SendOptions,
 } from "@cursor/sdk";
@@ -19,6 +23,7 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 
 import * as CursorSdk from "./CursorSdk.ts";
+import { isCloudAgentId } from "./runsOn.ts";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 
 export const CURSOR_AGENT_SDK_PROTOCOL = "cursor-agent-sdk.local" as const;
@@ -32,7 +37,11 @@ export class CursorAgentSdkRunnerError extends Schema.TaggedError<CursorAgentSdk
   },
 ) {
   override get message(): string {
-    return `Cursor Agent SDK ${this.method} failed.`;
+    // Name Cursor's own reason (e.g. an unknown model) so the chat shows why.
+    const reason = this.cause instanceof Error ? this.cause.message.trim().replace(/\.+$/, "") : "";
+    return reason
+      ? `Cursor Agent SDK ${this.method} failed: ${reason}.`
+      : `Cursor Agent SDK ${this.method} failed.`;
   }
 }
 
@@ -57,6 +66,15 @@ export interface CursorAgentSdkRun {
   readonly agentId: string;
   readonly wait: Effect.Effect<RunResult, CursorAgentSdkRunnerError>;
   readonly cancel: Effect.Effect<void, CursorAgentSdkRunnerError>;
+  /**
+   * Injects text into the running turn without cancelling it. Undefined when
+   * the SDK run does not expose `Run.steer` (older SDKs, some cloud runs).
+   * "revert_to_followup" means the turn did not take the text and the caller
+   * must send it as an ordinary follow-up.
+   */
+  readonly steer?: (
+    text: string,
+  ) => Effect.Effect<"complete_delivered" | "revert_to_followup", CursorAgentSdkRunnerError>;
 }
 
 export interface CursorAgentSdkSession {
@@ -173,6 +191,14 @@ export type CursorAgentSdkProtocolLogEvent =
       readonly direction: "outgoing";
       readonly stage: "decoded";
       readonly payload: {
+        readonly type: "run.steer";
+        readonly runId: string;
+      };
+    }
+  | {
+      readonly direction: "outgoing";
+      readonly stage: "decoded";
+      readonly payload: {
         readonly type: "agent.messages.list";
         readonly agentId: string;
       };
@@ -206,7 +232,8 @@ function runnerError(cause: unknown, method: string): CursorAgentSdkRunnerError 
 }
 
 function isActiveRunConflict(cause: unknown): boolean {
-  return cause instanceof Error && /already has active run/i.test(cause.message);
+  // Cursor phrases it "[agent_busy] Agent already has an active run" (SDK 1.0.35).
+  return cause instanceof Error && /already has (an )?active run|agent_busy/i.test(cause.message);
 }
 
 export function isCursorCancellationError(cause: unknown): boolean {
@@ -384,11 +411,20 @@ export const makeCursorAgentSdkRunner = Effect.fn("makeCursorAgentSdkRunner")(fu
         typeof input.options.local?.cwd === "string"
           ? input.options.local.cwd
           : input.options.local?.cwd?.[0];
-      const runOptions = {
-        runtime: "local" as const,
-        ...(cwd === undefined ? {} : { cwd }),
-        ...(input.options.local?.store === undefined ? {} : { store: input.options.local.store }),
+      // Worker and cloud agents (ids `bc-`) are read through Cursor's API, local ones from disk.
+      const cloudOptions = {
+        runtime: "cloud" as const,
+        ...(input.options.apiKey === undefined ? {} : { apiKey: input.options.apiKey }),
       };
+      const runOptions = isCloudAgentId(agent.agentId)
+        ? cloudOptions
+        : {
+            runtime: "local" as const,
+            ...(cwd === undefined ? {} : { cwd }),
+            ...(input.options.local?.store === undefined
+              ? {}
+              : { store: input.options.local.store }),
+          };
       let abandonedRunRecoveryAvailable = input.operation === "resume";
 
       return {
@@ -471,7 +507,13 @@ export const makeCursorAgentSdkRunner = Effect.fn("makeCursorAgentSdkRunner")(fu
                     payload: { type: "run.cancel", runId: activeRun.id },
                   });
                   yield* Effect.tryPromise({
-                    try: () => Agent.cancelRun(activeRun.id, runOptions),
+                    try: () =>
+                      Agent.cancelRun(
+                        activeRun.id,
+                        runOptions.runtime === "cloud"
+                          ? { ...runOptions, agentId: agent.agentId }
+                          : runOptions,
+                      ),
                     catch: (cause) => runnerError(cause, "agent.cancelRun"),
                   });
                   return yield* startRun();
@@ -500,6 +542,23 @@ export const makeCursorAgentSdkRunner = Effect.fn("makeCursorAgentSdkRunner")(fu
           return {
             runId: run.id,
             agentId: run.agentId,
+            ...(typeof run.steer === "function"
+              ? {
+                  steer: (text: string) =>
+                    log({
+                      direction: "outgoing",
+                      stage: "decoded",
+                      payload: { type: "run.steer", runId: run.id },
+                    }).pipe(
+                      Effect.andThen(
+                        Effect.tryPromise({
+                          try: () => run.steer!(text),
+                          catch: (cause) => runnerError(cause, "run.steer"),
+                        }),
+                      ),
+                    ),
+                }
+              : {}),
             wait: Effect.tryPromise({
               try: async () => {
                 const result = await run.wait();
@@ -557,11 +616,17 @@ export const makeCursorAgentSdkRunner = Effect.fn("makeCursorAgentSdkRunner")(fu
         }).pipe(
           Effect.andThen(
             Effect.tryPromise({
-              try: () =>
-                Agent.messages.list(agent.agentId, {
-                  runtime: "local",
-                  ...(cwd === undefined ? {} : { cwd }),
-                }),
+              // Stored messages exist only for local agents; worker and cloud agents are
+              // replayed run by run from Cursor, like the Cursor agents page does.
+              try: async () =>
+                isCloudAgentId(agent.agentId)
+                  ? cloudAgentHistory(agent.agentId, cloudOptions, (id, options) =>
+                      Agent.listRuns(id, options),
+                    )
+                  : Agent.messages.list(agent.agentId, {
+                      runtime: "local",
+                      ...(cwd === undefined ? {} : { cwd }),
+                    }),
               catch: (cause) => runnerError(cause, "agent.messages.list"),
             }),
           ),
@@ -611,3 +676,63 @@ export const layer = Layer.effect(
     );
   }),
 );
+
+const CLOUD_HISTORY_MAX_PAGES = 20;
+
+/**
+ * Turns replayed run messages into the user and assistant turns `messages.list`
+ * returns for local agents. Streamed assistant chunks of one turn are joined.
+ */
+export function agentMessagesFromRun(
+  agentId: string,
+  runId: string,
+  messages: ReadonlyArray<SDKMessage>,
+): Array<AgentMessage> {
+  const turns: Array<{ type: "user" | "assistant"; text: string }> = [];
+  for (const message of messages) {
+    if (message.type !== "user" && message.type !== "assistant") continue;
+    const text = message.message.content
+      .flatMap((block) => (block.type === "text" ? [block.text] : []))
+      .join("");
+    if (text.length === 0) continue;
+    const last = turns.at(-1);
+    if (last !== undefined && last.type === message.type) last.text += text;
+    else turns.push({ type: message.type, text });
+  }
+  return turns.map((turn, index) => ({
+    type: turn.type,
+    uuid: `${runId}:${index}`,
+    agent_id: agentId,
+    message: { content: [{ type: "text", text: turn.text }] },
+  }));
+}
+
+/** Full history of a worker or cloud agent: every finished run, oldest first. */
+async function cloudAgentHistory(
+  agentId: string,
+  cloudOptions: { readonly runtime: "cloud"; readonly apiKey?: string },
+  listRuns: (agentId: string, options: ListRunsOptions) => Promise<ListResult<Run>>,
+): Promise<Array<AgentMessage>> {
+  const runs: Array<Run> = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < CLOUD_HISTORY_MAX_PAGES; page += 1) {
+    const result = await listRuns(agentId, {
+      ...cloudOptions,
+      limit: 50,
+      ...(cursor === undefined ? {} : { cursor }),
+    });
+    runs.push(...result.items);
+    cursor = result.nextCursor;
+    if (cursor === undefined) break;
+  }
+  const finished = runs
+    .filter((run) => String(run.status).toLowerCase() !== "running")
+    .toSorted((left, right) => (left.createdAt ?? 0) - (right.createdAt ?? 0));
+  const history: Array<AgentMessage> = [];
+  for (const run of finished) {
+    const messages: Array<SDKMessage> = [];
+    for await (const message of run.stream()) messages.push(message);
+    history.push(...agentMessagesFromRun(agentId, run.id, messages));
+  }
+  return history;
+}

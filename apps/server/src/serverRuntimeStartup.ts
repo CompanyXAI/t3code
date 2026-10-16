@@ -255,7 +255,7 @@ export const resolveWelcomeBase = Effect.gen(function* () {
   } as const;
 });
 
-const resolveAutoBootstrapWelcomeTargets = Effect.gen(function* () {
+export const resolveAutoBootstrapWelcomeTargets = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const randomUUID = crypto.randomUUIDv4();
   const serverConfig = yield* ServerConfig.ServerConfig;
@@ -282,28 +282,57 @@ const resolveAutoBootstrapWelcomeTargets = Effect.gen(function* () {
       (thread) =>
         thread.projectId === project.id && thread.lineage.relationshipToParent !== "subagent",
     );
-    if (existingThread === undefined) {
+    bootstrapProjectId = project.id;
+    if (existingThread !== undefined) {
+      bootstrapThreadId = existingThread.id;
+    } else {
       const serverSettings = yield* ServerSettings.ServerSettingsService;
       const settings = yield* serverSettings.getSettings;
-      const launched = yield* threadLaunch.launch({
-        commandId: CommandId.make(yield* randomUUID),
+      const projectSettings = resolveProjectSettings(settings, project.id, project).settings;
+      const modelSelection = projectSettings.defaultModelSelection ?? threadModelSelection;
+      // Same grace as provider continuation: a project that turned the
+      // instance off must not fail the whole server boot. Skip the welcome
+      // thread and leave the project selectable in the UI.
+      const enabled = yield* threads.isProviderInstanceEnabledForProject({
         projectId: project.id,
-        title: "New thread",
-        modelSelection:
-          resolveProjectSettings(settings, project.id, project).settings.defaultModelSelection ??
-          threadModelSelection,
-        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: resolveProjectSettings(settings, project.id, project).settings
-          .defaultRuntimeMode,
-        workspaceStrategy: { type: "root" },
-        createdBy: "system",
-        creationSource: "server",
+        instanceId: modelSelection.instanceId,
       });
-      bootstrapProjectId = project.id;
-      bootstrapThreadId = launched.threadId;
-    } else {
-      bootstrapProjectId = project.id;
-      bootstrapThreadId = existingThread.id;
+      if (!enabled) {
+        yield* Effect.logWarning(
+          "Skipped auto-bootstrap thread; provider instance is disabled for project",
+          {
+            projectId: project.id,
+            instanceId: modelSelection.instanceId,
+          },
+        );
+      } else {
+        const launched = yield* threadLaunch
+          .launch({
+            commandId: CommandId.make(yield* randomUUID),
+            projectId: project.id,
+            title: "New thread",
+            modelSelection,
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+            runtimeMode: projectSettings.defaultRuntimeMode,
+            workspaceStrategy: { type: "root" },
+            createdBy: "system",
+            creationSource: "server",
+          })
+          .pipe(
+            Effect.catchTag("ThreadManagementProviderInstanceDisabledError", (error) =>
+              Effect.logWarning(
+                "Skipped auto-bootstrap thread; provider instance is disabled for project",
+                {
+                  projectId: error.projectId,
+                  instanceId: error.instanceId,
+                },
+              ).pipe(Effect.as(undefined)),
+            ),
+          );
+        if (launched !== undefined) {
+          bootstrapThreadId = launched.threadId;
+        }
+      }
     }
   }
 
@@ -312,6 +341,21 @@ const resolveAutoBootstrapWelcomeTargets = Effect.gen(function* () {
     ...(bootstrapThreadId ? { bootstrapThreadId } : {}),
   } satisfies AutoBootstrapWelcomeTargets;
 });
+
+/**
+ * The pairing URL without its credential, for logs: pairing tokens never land
+ * in files. Drops the fragment and any `token` query parameter.
+ */
+export function redactPairingUrlForLog(url: string): string {
+  try {
+    const parsed = new URL(url);
+    parsed.hash = "";
+    parsed.searchParams.delete("token");
+    return parsed.toString();
+  } catch {
+    return url.replace(/[#?].*$/, "");
+  }
+}
 
 const resolveStartupBrowserTarget = Effect.gen(function* () {
   const serverConfig = yield* ServerConfig.ServerConfig;
@@ -601,7 +645,12 @@ const make = (options?: StartupOptions) =>
             if (serverConfig.mode !== "desktop") {
               yield* Effect.logInfo(
                 "Authentication required. Open T3 Code using the pairing URL.",
-              ).pipe(Effect.annotateLogs({ pairingUrl: startupBrowserTarget }));
+              ).pipe(
+                Effect.annotateLogs({
+                  pairingUrl: redactPairingUrlForLog(startupBrowserTarget),
+                  pairingToken: "redacted; run `t3 pair` for a pairing link",
+                }),
+              );
             }
             yield* runStartupPhase("browser.open", maybeOpenBrowser(startupBrowserTarget));
           }

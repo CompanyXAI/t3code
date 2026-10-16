@@ -29,6 +29,10 @@ import { useRelayEnvironmentDiscovery } from "~/state/environments";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { ConnectionStatusDot } from "../ConnectionStatusDot";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
+import {
+  MACHINE_NAME_REDACT_PROPS,
+  RedactedSensitiveText,
+} from "../settings/RedactedSensitiveText";
 import { ITEM_ROW_CLASSNAME, ITEM_ROW_INNER_CLASSNAME } from "../settings/itemRows";
 import { Checkbox } from "../ui/checkbox";
 import { Button } from "../ui/button";
@@ -404,7 +408,13 @@ export function CloudEnvironmentConnectRows({
             kind={machineKind}
             className="size-4 shrink-0 text-muted-foreground"
           />
-          <span className="min-w-0 flex-1 truncate text-sm font-medium">{environment.label}</span>
+          <span className="min-w-0 flex-1 truncate text-sm font-medium">
+            <RedactedSensitiveText
+              value={environment.label}
+              {...MACHINE_NAME_REDACT_PROPS}
+              className="truncate text-sm font-medium text-foreground"
+            />
+          </span>
           <Tooltip>
             <TooltipTrigger
               render={<span tabIndex={0} />}
@@ -463,7 +473,13 @@ export function CloudEnvironmentConnectRows({
                 kind={machineKind}
                 className="size-4 shrink-0 text-muted-foreground"
               />
-              <p className="truncate text-sm font-medium">{environment.label}</p>
+              <p className="truncate text-sm font-medium">
+                <RedactedSensitiveText
+                  value={environment.label}
+                  {...MACHINE_NAME_REDACT_PROPS}
+                  className="truncate text-sm font-medium text-foreground"
+                />
+              </p>
             </div>
             <p
               className={cn(

@@ -380,6 +380,11 @@ export const OrchestrationV2AppThread = Schema.Struct({
   branchPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   activeProviderThreadId: Schema.NullOr(ProviderThreadId),
   historyOrigin: Schema.optional(OrchestrationV2ThreadHistoryOrigin),
+  /**
+   * Set on imports whose native session cannot be resumed (Cursor IDE chats /
+   * transcripts: only Cursor SDK `agent-*` ids resume). Sending starts a new agent.
+   */
+  nativeResumeUnavailable: Schema.optional(Schema.Literal("cursor_ide_import")),
   lineage: OrchestrationV2AppThreadLineage,
   forkedFrom: Schema.NullOr(
     Schema.Union([
