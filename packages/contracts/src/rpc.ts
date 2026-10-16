@@ -1333,6 +1333,7 @@ const WsCursorAgentsApprovalsRpc = Rpc.make(WS_METHODS.cursorAgentsApprovals, {
   payload: Schema.Struct({}),
   success: CursorAgentsApprovalsResult,
   error: Schema.Union([CursorAgentsError, EnvironmentAuthorizationError]),
+  stream: true,
 });
 
 const WsCursorAgentsRespondApprovalRpc = Rpc.make(WS_METHODS.cursorAgentsRespondApproval, {

@@ -168,6 +168,8 @@ const pathEvidenceFolder = ${cursorIdePathEvidenceFolder.toString()};
       folders.push({ key, folder });
     } catch {}
   }
+  // Listing never reads bubbles. Path evidence is a separate opt-in (~100s cold).
+  if (workerData.readPathEvidence) {
   const ev = open(workerData.globalDb);
   try {
     const get = ev.prepare("SELECT value FROM cursorDiskKV WHERE key = ?");
@@ -185,6 +187,7 @@ const pathEvidenceFolder = ${cursorIdePathEvidenceFolder.toString()};
       if (folder) out.pathFolders.push([r.id, folder]);
     }
   } finally { ev.close(); }
+  }
 }
 for (const d of dirs) {
   const p = path.join(workerData.workspaceStorage, d, "state.vscdb");
@@ -268,7 +271,7 @@ export function buildCursorIdeIndex(
 
 let cache: { key: string; index: Promise<CursorIdeIndex> } | null = null;
 
-function cacheKey(globalDb: string): string | null {
+function cacheKey(globalDb: string, readPathEvidence: boolean): string | null {
   try {
     const main = NodeFS.statSync(globalDb).mtimeMs;
     let wal = 0;
@@ -277,26 +280,29 @@ function cacheKey(globalDb: string): string | null {
     } catch {
       wal = 0;
     }
-    return `${globalDb}\0${main}\0${wal}`;
+    return `${globalDb}\0${main}\0${wal}\0${readPathEvidence ? "1" : "0"}`;
   } catch {
     return null;
   }
 }
 
-/** The composer index, built off the event loop; null when the DB is absent or the build fails or times out. */
+/**
+ * The composer index, built off the event loop; null when the DB is absent or the build fails or times out.
+ * Listing passes `readPathEvidence: false` so the worker never opens bubble rows.
+ */
 export async function loadCursorIdeIndex(
   globalDb: string,
   workspaceStorage: string,
-  // Path evidence reads the bubbles of chats without a workspace id (~100 s cold on SCH99).
   timeoutMs = 300_000,
+  readPathEvidence = false,
 ): Promise<CursorIdeIndex | null> {
-  const key = cacheKey(globalDb);
+  const key = cacheKey(globalDb, readPathEvidence);
   if (key === null) return null;
   if (cache === null || cache.key !== key) {
     const index = new Promise<CursorIdeIndex>((resolve, reject) => {
       const worker = new NodeWorkerThreads.Worker(WORKER_SOURCE, {
         eval: true,
-        workerData: { globalDb, workspaceStorage },
+        workerData: { globalDb, workspaceStorage, readPathEvidence },
       });
       const timer = setTimeout(() => {
         void worker.terminate();

@@ -24,7 +24,10 @@ import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
+import { emptyTokenCounts } from "@t3tools/shared/usagePolicies";
 
 import { AgentScope } from "@t3tools/shared/AgentScope";
 import { isTemporaryWorktreeBranch } from "@t3tools/shared/git";
@@ -844,6 +847,31 @@ export const layer: Layer.Layer<
                     : { context: input.analyticsContext }),
                 }),
               );
+              const usage = providerTurn.turnTokenUsage;
+              const model = input.analyticsContext?.modelSelection.model;
+              if (
+                usage === undefined ||
+                usage.usageStatus === "unavailable" ||
+                usage.inputTokens === undefined ||
+                model === undefined
+              ) {
+                return;
+              }
+              const host = yield* Effect.serviceOption(ProviderHost.ProviderHost);
+              if (Option.isNone(host)) return;
+              yield* host.value.recordUsagePolicy({
+                instanceId: input.providerInstanceId,
+                driverKind: input.event.driver,
+                model,
+                delta: {
+                  ...emptyTokenCounts(),
+                  inputTokens: usage.inputTokens,
+                  cachedInputTokens: usage.cachedInputTokens ?? 0,
+                  cacheCreationTokens: usage.cacheCreationTokens ?? 0,
+                  outputTokens: usage.outputTokens ?? 0,
+                  reasoningTokens: usage.reasoningTokens ?? 0,
+                },
+              });
             }),
           ),
           (effect) =>

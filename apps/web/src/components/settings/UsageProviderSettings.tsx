@@ -1,4 +1,9 @@
-import type { EnvironmentId, UnifiedSettings } from "@t3tools/contracts";
+import type {
+  EnvironmentId,
+  ProviderInstanceConfig,
+  ServerSettingsPatch,
+  UnifiedSettings,
+} from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import { PlusIcon } from "lucide-react";
 import { useState } from "react";
@@ -21,16 +26,59 @@ import { AddUsageLimitSourceDialog } from "./AddUsageLimitSourceDialog";
 import { searchableSetting } from "./settingsSearch";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
 
+const cursorConfigFlag = (config: ProviderInstanceConfig["config"]): boolean | undefined => {
+  if (config === null || typeof config !== "object" || Array.isArray(config)) return undefined;
+  const value = (config as { keychainUsageEnabled?: unknown }).keychainUsageEnabled;
+  return typeof value === "boolean" ? value : undefined;
+};
+
+/** Writes the flag onto each Cursor account. With no account yet, keeps the legacy server flag. */
+export function cursorKeychainUsagePatch(
+  providerInstances: UnifiedSettings["providerInstances"],
+  enabled: boolean,
+): ServerSettingsPatch {
+  const ids = (Object.keys(providerInstances) as Array<keyof typeof providerInstances>).filter(
+    (id) => providerInstances[id]?.driver === "cursor",
+  );
+  if (ids.length === 0) return { cursorKeychainUsageEnabled: enabled };
+  const next = { ...providerInstances };
+  for (const id of ids) {
+    const instance = providerInstances[id];
+    if (instance === undefined) continue;
+    const config =
+      instance.config !== null &&
+      typeof instance.config === "object" &&
+      !Array.isArray(instance.config)
+        ? instance.config
+        : {};
+    next[id] = { ...instance, config: { ...config, keychainUsageEnabled: enabled } };
+  }
+  return { providerInstances: next };
+}
+
+export function cursorKeychainUsageChecked(
+  providerInstances: UnifiedSettings["providerInstances"],
+  legacy: boolean,
+): boolean {
+  const flags = Object.values(providerInstances)
+    .filter((instance) => instance.driver === "cursor")
+    .map((instance) => cursorConfigFlag(instance.config))
+    .filter((flag): flag is boolean => flag !== undefined);
+  return flags.length > 0 ? flags.some(Boolean) : legacy;
+}
+
 export function UsageProviderSettings({
   environmentId,
   environmentLabel,
   sources,
+  providerInstances,
   cursorKeychainUsageEnabled,
   readOnly,
 }: {
   readonly environmentId: EnvironmentId;
   readonly environmentLabel: string;
   readonly sources: UnifiedSettings["usageLimitSources"];
+  readonly providerInstances: UnifiedSettings["providerInstances"];
   readonly cursorKeychainUsageEnabled: boolean;
   readonly readOnly: boolean;
 }) {
@@ -52,7 +100,7 @@ export function UsageProviderSettings({
     try {
       const result = await updateCursorSettings({
         environmentId,
-        input: { patch: { cursorKeychainUsageEnabled: enabled } },
+        input: { patch: cursorKeychainUsagePatch(providerInstances, enabled) },
       });
       if (result._tag === "Success") {
         await refreshProviders({ environmentId, input: {} });
@@ -83,7 +131,7 @@ export function UsageProviderSettings({
             control={
               <Switch
                 aria-label="Cursor account usage"
-                checked={cursorKeychainUsageEnabled}
+                checked={cursorKeychainUsageChecked(providerInstances, cursorKeychainUsageEnabled)}
                 disabled={readOnly || updatingCursor}
                 onCheckedChange={(enabled) => void setCursorUsageEnabled(enabled)}
               />

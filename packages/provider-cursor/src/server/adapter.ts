@@ -9,7 +9,6 @@ import type {
   ToolCall,
 } from "@cursor/sdk";
 import { formatReadToolLabel, formatSearchToolLabel } from "@t3tools/shared/toolActivity";
-import { emptyTokenCounts } from "@t3tools/shared/usagePolicies";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import {
   isOrchestrationV2WorkActive,
@@ -890,6 +889,14 @@ interface ActiveCursorTextStream {
   nextSegment: number;
 }
 
+interface CursorTurnUsageReport {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly cacheReadTokens: number;
+  readonly cacheWriteTokens: number;
+  readonly reasoningTokens?: number | undefined;
+}
+
 interface ActiveCursorTurn {
   readonly input: ProviderAdapter.ProviderAdapterV2TurnInput;
   readonly run: CursorAgentSdk.CursorAgentSdkRun;
@@ -904,8 +911,8 @@ interface ActiveCursorTurn {
   readonly reasoning: ActiveCursorTextStream;
   interrupted: boolean;
   finalized: boolean;
-  /** True after a real SDK usage report was recorded for this turn. */
-  usageRecorded: boolean;
+  /** First SDK usage report for this turn. Recorded once from the terminal event. */
+  reportedUsage?: CursorTurnUsageReport;
 }
 
 interface CursorLiveAgent {
@@ -2134,40 +2141,15 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
           return candidates.filter((value): value is string => typeof value === "string").join("");
         };
 
-        type CursorTurnUsageReport = {
-          readonly inputTokens: number;
-          readonly outputTokens: number;
-          readonly cacheReadTokens: number;
-          readonly cacheWriteTokens: number;
-          readonly reasoningTokens?: number | undefined;
-        };
-
-        const cursorTokenUsageToDelta = (usage: CursorTurnUsageReport) => ({
-          ...emptyTokenCounts(),
-          inputTokens: Math.max(0, usage.inputTokens),
-          cachedInputTokens: Math.max(0, usage.cacheReadTokens),
-          cacheCreationTokens: Math.max(0, usage.cacheWriteTokens),
-          outputTokens: Math.max(0, usage.outputTokens),
-          reasoningTokens: Math.max(0, usage.reasoningTokens ?? 0),
-        });
-
-        const recordTurnUsage = Effect.fnUntraced(function* (
+        const rememberTurnUsage = (
           context: ActiveCursorTurn,
           usage: CursorTurnUsageReport | undefined,
-        ) {
-          if (usage === undefined || context.usageRecorded) return;
+        ) => {
+          if (usage === undefined || context.reportedUsage !== undefined) return;
           const total = Math.max(0, usage.inputTokens) + Math.max(0, usage.outputTokens);
           if (total <= 0) return;
-          context.usageRecorded = true;
-          yield* host
-            .recordUsagePolicy({
-              instanceId: adapterOptions.instanceId,
-              driverKind: CursorAgentSdk.CURSOR_PROVIDER,
-              model: context.input.modelSelection.model,
-              delta: cursorTokenUsageToDelta(usage),
-            })
-            .pipe(Effect.catch(() => Effect.void));
-        });
+          context.reportedUsage = usage;
+        };
 
         const handleInteractionUpdate = Effect.fnUntraced(function* (
           context: ActiveCursorTurn,
@@ -2215,7 +2197,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
             case "turn-ended":
               yield* completeAssistant(context);
               yield* completeReasoning(context);
-              yield* recordTurnUsage(context, update.usage);
+              rememberTurnUsage(context, update.usage);
               return;
             case "shell-output-delta": {
               const shell = Array.from(context.tools.values())
@@ -2267,6 +2249,22 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
           status: input.status,
           startedAt: input.context.startedAt,
           completedAt: input.completedAt,
+          ...(input.context.reportedUsage === undefined ||
+          input.status === "pending" ||
+          input.status === "running"
+            ? {}
+            : {
+                turnTokenUsage: {
+                  usageStatus: "complete" as const,
+                  usageScope: "main_agent" as const,
+                  hasSubagents: input.context.subagents.size > 0,
+                  inputTokens: Math.max(0, input.context.reportedUsage.inputTokens),
+                  outputTokens: Math.max(0, input.context.reportedUsage.outputTokens),
+                  cachedInputTokens: Math.max(0, input.context.reportedUsage.cacheReadTokens),
+                  cacheCreationTokens: Math.max(0, input.context.reportedUsage.cacheWriteTokens),
+                  reasoningTokens: Math.max(0, input.context.reportedUsage.reasoningTokens ?? 0),
+                },
+              }),
         });
 
         const finalizeTurn = Effect.fnUntraced(function* (input: {
@@ -2390,7 +2388,10 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
           if (openInput.agentId !== undefined && isCloudAgentId(openInput.agentId)) {
             return Effect.succeed({ kind: "remote-resume" });
           }
-          const runsOn = cursorRunsOn(openInput.modelSelection);
+          const runsOn = cursorRunsOn(
+            openInput.modelSelection,
+            adapterOptions.settings.defaultRunsOn,
+          );
           if (openInput.operation === "resume" || runsOn === "local") {
             return Effect.succeed({ kind: "local" });
           }
@@ -2628,7 +2629,6 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
               },
               interrupted: false,
               finalized: false,
-              usageRecorded: false,
             };
             yield* Ref.set(activeTurn, context);
             yield* emitProviderEvent({
@@ -2672,7 +2672,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
                     });
                   }
                   if (context !== null) {
-                    yield* recordTurnUsage(context, result.usage);
+                    rememberTurnUsage(context, result.usage);
                     const transportFailure = context.assistantReply.failure;
                     const status =
                       transportFailure === undefined ? terminalStatus(context, result) : "failed";

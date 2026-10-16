@@ -40,6 +40,7 @@ import * as Stream from "effect/Stream";
 import * as NodePath from "node:path";
 
 import * as CursorAgentIndex from "./CursorAgentIndex.ts";
+import { registerCursorAgentsRefresh } from "./CursorAgentsRefresh.ts";
 
 const CURSOR_DRIVER = ProviderDriverKind.make("cursor");
 
@@ -107,9 +108,6 @@ const processMachines = new Map<string, MachineEntry>();
  * and at most one sync per account.
  */
 const processIndexes = new Map<string, CursorAgentIndex.CursorAgentIndex>();
-
-/** On a first-ever sync the page waits this long before showing "syncing". */
-const FIRST_SYNC_WAIT_MS = 10_000;
 
 /** Own-worker detection depends on the names entered on the page, so it is applied on read. */
 function withOwnMachines(
@@ -200,6 +198,34 @@ export const make = (deps: CursorAgentsDeps) => {
       }),
     );
 
+  let localCwds: ReadonlyArray<string> = [];
+  let localCache: ReadonlyArray<CursorAgentDirectory.CursorDirectoryEntry> = [];
+  let lastLocalAt = 0;
+
+  const refresh = Effect.fn("CursorAgents.refresh")(function* () {
+    const instances = yield* cursorInstances;
+    const ready: Array<CursorAgentDirectory.CursorDirectoryAccount> = [];
+    for (const instance of instances) {
+      const account = yield* accountOf(instance, {
+        ...(localCwds.length === 0 ? {} : { localCwds }),
+      }).pipe(Effect.timeout("15 seconds"), Effect.result);
+      if (account._tag === "Success") ready.push(account.success);
+    }
+    for (const account of ready) {
+      yield* Effect.promise(() => index.kick(account.accountId, syncFor(account)));
+    }
+    const now = yield* Effect.clockWith((clock) => clock.currentTimeMillis);
+    const localOwner = ready[0];
+    if (localOwner !== undefined && localCwds.length > 0 && now - lastLocalAt >= 20_000) {
+      lastLocalAt = now;
+      localCache = yield* deps.directory.listLocal(localOwner).pipe(
+        Effect.timeout("30 seconds"),
+        Effect.orElseSucceed(() => []),
+      );
+    }
+  });
+  registerCursorAgentsRefresh(refresh());
+
   const list = (input: CursorAgentsListInput) =>
     Effect.gen(function* () {
       const instances = yield* cursorInstances;
@@ -223,15 +249,15 @@ export const make = (deps: CursorAgentsDeps) => {
             message: describeCause(account.failure),
           });
       }
-      // Every account answers from its stored index right away; syncs run in
-      // the background, one per account, and only fetch what changed.
+      // The page only reads the cache. The scheduler fills it.
+      if (input.localCwds !== undefined) localCwds = input.localCwds;
       const ownMachineNames = input.ownMachineNames ?? [];
       const perAccount = yield* Effect.forEach(
         ready,
         (account) =>
-          Effect.promise(() =>
-            index.read(account.accountId, syncFor(account), FIRST_SYNC_WAIT_MS),
-          ).pipe(Effect.map((state) => ({ account, state }))),
+          Effect.promise(() => index.peek(account.accountId)).pipe(
+            Effect.map((state) => ({ account, state })),
+          ),
         { concurrency: "unbounded" },
       );
       const syncState = new Map(
@@ -247,14 +273,7 @@ export const make = (deps: CursorAgentsDeps) => {
       // Local agents come from this computer's Cursor store, which every
       // login shares and which records no account: they belong to all
       // accounts, are listed once and are opened with the first ready login.
-      const localOwner = ready[0];
-      const localEntries =
-        localOwner === undefined || (input.localCwds ?? []).length === 0
-          ? []
-          : yield* deps.directory.listLocal(localOwner).pipe(
-              Effect.timeout("30 seconds"),
-              Effect.orElseSucceed(() => []),
-            );
+      const localEntries = localCache;
       const cloudEntries = perAccount
         .flatMap(({ state }) => state.snapshot?.entries ?? [])
         .map((entry) => withOwnMachines(entry, ownMachineNames));
@@ -267,19 +286,9 @@ export const make = (deps: CursorAgentsDeps) => {
       // Show which login each instance really uses, and flag two instances on
       // one account so a launch never silently lands on the wrong account.
       const emails = new Map<string, string | null>();
-      const found = yield* Effect.forEach(
-        ready,
-        (account) =>
-          deps.directory.accountEmail(account).pipe(
-            Effect.timeout("15 seconds"),
-            Effect.orElseSucceed(() => undefined),
-            Effect.map(
-              (email) => [account.accountId, email?.trim().toLowerCase() || null] as const,
-            ),
-          ),
-        { concurrency: "unbounded" },
-      );
-      for (const [id, email] of found) emails.set(id, email);
+      for (const { account, state } of perAccount) {
+        emails.set(account.accountId, state.snapshot?.email ?? null);
+      }
       const withIdentity = accounts.map((account) => {
         const email = emails.get(account.instanceId) ?? null;
         const sharedWith =
@@ -524,6 +533,8 @@ export const make = (deps: CursorAgentsDeps) => {
     stop,
     follow,
     machine,
+    refresh: refresh(),
+    settle: Effect.promise(() => index.settle()),
   };
 };
 

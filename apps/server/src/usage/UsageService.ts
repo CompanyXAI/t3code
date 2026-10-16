@@ -32,6 +32,7 @@ import { HttpClient, HttpClientResponse } from "effect/http";
 import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as UsagePolicyService from "./UsagePolicyService.ts";
 import { BUILT_IN_USAGE_DRIVERS, type BuiltInUsageReadersEnv } from "../provider/builtInDrivers.ts";
 import type { ProviderDriver } from "@t3tools/provider-core/server/driver";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
@@ -785,6 +786,10 @@ export const make = Effect.gen(function* () {
     const aggregated = aggregator.finish();
     const readAt = yield* DateTime.now;
     const finishedAtMs = yield* Clock.currentTimeMillis;
+    const usagePolicyService = yield* Effect.serviceOption(UsagePolicyService.UsagePolicyService);
+    const usagePolicy = Option.isNone(usagePolicyService)
+      ? undefined
+      : yield* usagePolicyService.value.status.pipe(Effect.orElseSucceed(() => undefined));
 
     return {
       contractVersion: USAGE_CONTRACT_VERSION,
@@ -796,6 +801,7 @@ export const make = Effect.gen(function* () {
       sources,
       pricing: pricing(),
       scanDurationMs: Math.max(0, finishedAtMs - startedAtMs),
+      ...(usagePolicy === undefined ? {} : { usagePolicy }),
     } satisfies UsageSummary;
   });
 

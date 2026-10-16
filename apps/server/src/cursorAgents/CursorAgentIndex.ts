@@ -212,8 +212,7 @@ export class CursorAgentIndex {
     return slot;
   }
 
-  /** Waits up to `waitMs` only when there is no snapshot yet (first sync). */
-  async read(accountId: string, sync: CursorIndexSync, waitMs: number): Promise<CursorIndexState> {
+  private async ensureLoaded(accountId: string): Promise<Slot> {
     const slot = this.slotOf(accountId);
     if (!slot.loaded) {
       slot.loading ??= this.storage.load(accountId).then(
@@ -227,11 +226,37 @@ export class CursorAgentIndex {
       );
       await slot.loading;
     }
+    return slot;
+  }
+
+  /** Stored snapshot only. Does not start a sync. */
+  async peek(accountId: string): Promise<CursorIndexState> {
+    const slot = await this.ensureLoaded(accountId);
+    return { snapshot: slot.snapshot, syncing: slot.inFlight !== undefined, error: slot.error };
+  }
+
+  /** Starts a sync when the snapshot is missing, stale, or older than the delta interval. */
+  async kick(accountId: string, sync: CursorIndexSync): Promise<void> {
+    const slot = await this.ensureLoaded(accountId);
     const due =
       slot.snapshot === undefined ||
       slot.stale ||
       this.now() - slot.snapshot.syncedAt > DELTA_EVERY_MS;
     if (due) this.start(accountId, slot, sync);
+  }
+
+  /** Resolves when every in-flight sync has finished. */
+  async settle(): Promise<void> {
+    const pending = [...this.slots.values()].flatMap((slot) =>
+      slot.inFlight === undefined ? [] : [slot.inFlight],
+    );
+    await Promise.all(pending);
+  }
+
+  /** Waits up to `waitMs` only when there is no snapshot yet (first sync). */
+  async read(accountId: string, sync: CursorIndexSync, waitMs: number): Promise<CursorIndexState> {
+    await this.kick(accountId, sync);
+    const slot = this.slotOf(accountId);
     if (slot.snapshot === undefined && slot.inFlight !== undefined && waitMs > 0) {
       let timer: ReturnType<typeof setTimeout> | undefined;
       await Promise.race([

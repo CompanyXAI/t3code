@@ -19,7 +19,7 @@ export const CURSOR_RUNS_ON_OPTION_ID = "runsOn";
 
 export type CursorRunsOn = "local" | "worker" | "cloud";
 
-export const cursorRunsOnDescriptor = () =>
+export const cursorRunsOnDescriptor = (fallback: CursorRunsOn = "local") =>
   buildSelectOptionDescriptor({
     id: CURSOR_RUNS_ON_OPTION_ID,
     label: "Runs on",
@@ -28,7 +28,6 @@ export const cursorRunsOnDescriptor = () =>
         value: "local",
         label: "This PC (T3 only)",
         description: "Runs inside T3. Not visible in Cursor.",
-        isDefault: true,
       },
       {
         value: "worker",
@@ -36,12 +35,15 @@ export const cursorRunsOnDescriptor = () =>
         description: "This account's self-hosted worker. Visible in Cursor.",
       },
       { value: "cloud", label: "Cloud", description: "Cursor Cloud. Visible in Cursor." },
-    ],
+    ].map((option) => ({ ...option, ...(option.value === fallback ? { isDefault: true } : {}) })),
   });
 
-export function cursorRunsOn(selection: ModelSelection): CursorRunsOn {
+export function cursorRunsOn(
+  selection: ModelSelection,
+  fallback: CursorRunsOn = "local",
+): CursorRunsOn {
   const value = selection.options?.find((option) => option.id === CURSOR_RUNS_ON_OPTION_ID)?.value;
-  return value === "worker" || value === "cloud" ? value : "local";
+  return value === "local" || value === "worker" || value === "cloud" ? value : fallback;
 }
 
 /** Model options without the T3-only "Runs on" choice, for the Cursor SDK. */

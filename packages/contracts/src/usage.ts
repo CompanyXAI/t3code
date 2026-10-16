@@ -1,6 +1,7 @@
 import * as Schema from "effect/Schema";
 
 import { ForwardCompatibleArray, NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { UsagePolicyStatus } from "./usagePolicies.ts";
 
 /**
  * Bumped whenever the shape of {@link UsageSummary} changes incompatibly.
@@ -156,6 +157,8 @@ export const UsageSummary = Schema.Struct({
   sources: ForwardCompatibleArray(UsageSource),
   pricing: UsagePricing,
   scanDurationMs: NonNegativeInt,
+  /** Current T3 usage-policy counters, when the server has the policy service. */
+  usagePolicy: Schema.optional(UsagePolicyStatus),
 });
 export type UsageSummary = typeof UsageSummary.Type;
 

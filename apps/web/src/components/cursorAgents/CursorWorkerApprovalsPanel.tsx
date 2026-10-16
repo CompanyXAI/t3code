@@ -3,7 +3,7 @@ import { useAtomValue } from "@effect/atom-react";
 import * as Option from "effect/Option";
 import { AsyncResult } from "effect/reactivity";
 import { CheckIcon, ShieldCheckIcon, XIcon } from "lucide-react";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 
 import {
   cursorProjectHooksSet,
@@ -49,7 +49,9 @@ export function CursorWorkerApprovalsPanel({
     () => cursorWorkerHookSetup({ environmentId, input: {} }),
     [environmentId],
   );
-  const setup = Option.getOrNull(AsyncResult.value(useAtomValue(setupAtom)));
+  const fetchedSetup = Option.getOrNull(AsyncResult.value(useAtomValue(setupAtom)));
+  const [setupOverride, setSetupOverride] = useState<typeof fetchedSetup>(null);
+  const setup = setupOverride ?? fetchedSetup;
   const respond = useAtomCommand(cursorWorkerApprovalRespond);
   const start = useAtomCommand(cursorWorkerHookStart);
   const agentName = (agentId: string | null) =>
@@ -130,7 +132,11 @@ export function CursorWorkerApprovalsPanel({
           <Button
             size="sm"
             variant="outline"
-            onClick={() => void start({ environmentId, input: { start: true } })}
+            onClick={() =>
+              void start({ environmentId, input: { start: true } }).then((result) => {
+                if (result._tag === "Success") setSetupOverride(result.value);
+              })
+            }
           >
             Enable worker approvals
           </Button>
@@ -159,16 +165,20 @@ function ProjectHooksRow({
     () => cursorProjectHooksState({ environmentId, input: { repoRoot } }),
     [environmentId, repoRoot],
   );
-  const state = Option.getOrNull(AsyncResult.value(useAtomValue(stateAtom)));
+  const fetched = Option.getOrNull(AsyncResult.value(useAtomValue(stateAtom)));
+  const [enabledOverride, setEnabledOverride] = useState<boolean | null>(null);
+  const enabled = enabledOverride ?? fetched?.enabled === true;
   const setHooks = useAtomCommand(cursorProjectHooksSet);
   return (
     <label className="flex items-center gap-2 text-xs">
       <Switch
         aria-label="Project hooks for repository"
-        checked={state?.enabled === true}
-        disabled={state === null}
-        onCheckedChange={(enabled) =>
-          void setHooks({ environmentId, input: { repoRoot, enabled } })
+        checked={enabled}
+        disabled={fetched === null && enabledOverride === null}
+        onCheckedChange={(next) =>
+          void setHooks({ environmentId, input: { repoRoot, enabled: next } }).then((result) => {
+            if (result._tag === "Success") setEnabledOverride(result.value.enabled);
+          })
         }
       />
       <RedactedSensitiveText value={repoRoot} {...PATH_REDACT_PROPS} className="truncate" />

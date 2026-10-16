@@ -26,6 +26,7 @@ import * as ServerConfig from "../config.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as AgentSessionScanner from "./AgentSessionScanner.ts";
+import * as CursorSourceSync from "./CursorSourceSync.ts";
 import { cursorProjectSlug } from "./CursorAgentSessionPaths.ts";
 
 const makeProjectShell = (workspaceRoot: string): OrchestrationProjectShell => ({
@@ -1374,6 +1375,44 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
           JSON.stringify({ schemaVersion: 1, title: "t", cwd }),
         );
       });
+
+    it.effect("reads the cursor source cache and does not walk ~/.cursor", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const userHomePath = yield* makeTempDir("t3code-user-home-");
+        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+        const guarded = FileSystem.FileSystem.of({
+          ...fileSystem,
+          readDirectory: (directory, options) =>
+            directory.includes(`${path.sep}.cursor`)
+              ? Effect.die(new Error("cursor scan on the request path"))
+              : fileSystem.readDirectory(directory, options),
+        });
+        const result = yield* runScan({
+          claudeHomePath,
+          codexHomePath,
+          userHomePath,
+          providerInstances: {
+            [ProviderInstanceId.make("cursor")]: {
+              driver: ProviderDriverKind.make("cursor"),
+              enabled: true,
+              config: {},
+            },
+          },
+        }).pipe(
+          Effect.provideService(FileSystem.FileSystem, guarded),
+          Effect.provideService(CursorSourceSync.CursorSourceSync, {
+            peek: () => ({ transcripts: [], truncated: false }),
+          }),
+        );
+        expect(
+          result.candidates.filter((candidate) => candidate.sources.includes("cursor")),
+        ).toEqual([]);
+        expect(result.truncated).toBeUndefined();
+      }),
+    );
 
     it.effect("skips Cursor transcripts without chats meta cwd", () =>
       Effect.gen(function* () {
@@ -2846,7 +2885,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
           });
 
           const simulatedOldTranscripts = Array.from(
-            { length: 20_000 }, // MAX_TRANSCRIPTS_PER_SOURCE
+            { length: 20_000 }, // exceeds MAX_TRANSCRIPTS_PER_SOURCE (5_000)
             (_, index) => `old-${index}.jsonl`,
           );
           const resolveTranscript = (filePath: string) =>

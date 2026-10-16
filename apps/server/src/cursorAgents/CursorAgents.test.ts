@@ -93,6 +93,8 @@ describe("CursorAgents", () => {
   it.effect("lists every Cursor account with its own key and keeps failures per account", () =>
     Effect.gen(function* () {
       const { service, keysSeen } = makeService();
+      yield* service.refresh;
+      yield* service.settle;
       const result = yield* service.list({ ownMachineNames: ["daniels-mbp"] });
       assert.deepStrictEqual(
         result.accounts.map((account) => account.instanceId),
@@ -110,7 +112,10 @@ describe("CursorAgents", () => {
 
   it.effect("shows each login's account and flags two instances on one account", () =>
     Effect.gen(function* () {
-      const plain = yield* makeService().service.list({});
+      const plainService = makeService().service;
+      yield* plainService.refresh;
+      yield* plainService.settle;
+      const plain = yield* plainService.list({});
       const work = plain.accounts.find((account) => account.instanceId === "work");
       assert.strictEqual(work?.email, "daniel@work.example");
       assert.strictEqual(work?.sharedWith, undefined);
@@ -118,10 +123,44 @@ describe("CursorAgents", () => {
         plain.accounts.find((account) => account.instanceId === "personal")?.email,
         null,
       );
-      const shared = yield* makeService([instance("work2", "key-work-2")]).service.list({});
+      const sharedService = makeService([instance("work2", "key-work-2")]).service;
+      yield* sharedService.refresh;
+      yield* sharedService.settle;
+      const shared = yield* sharedService.list({});
       assert.deepStrictEqual(
         shared.accounts.find((account) => account.instanceId === "work")?.sharedWith,
         [ProviderInstanceId.make("work2")],
+      );
+    }),
+  );
+
+  it.effect("lists from the cache and does not start a cloud scan", () =>
+    Effect.gen(function* () {
+      let cloudCalls = 0;
+      const directory = CursorAgentDirectory.make({
+        list: () => {
+          cloudCalls += 1;
+          return new Promise(() => undefined);
+        },
+        create: async () => ({}) as never,
+        resume: async () => ({}) as never,
+        listRuns: async () => ({ items: [] }) as never,
+        cancelRun: async () => undefined,
+        accountEmail: () => new Promise(() => undefined),
+      });
+      const service = CursorAgents.make({
+        listInstances: Effect.succeed([
+          instance("work", "key-work"),
+          instance("personal", "key-personal"),
+        ]),
+        directory,
+      });
+      const result = yield* service.list({ localCwds: ["/repo"] });
+      assert.equal(cloudCalls, 0);
+      assert.equal(result.entries.length, 0);
+      assert.deepStrictEqual(
+        result.accounts.map((account) => account.syncing),
+        [false, false],
       );
     }),
   );

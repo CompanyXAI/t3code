@@ -1,3 +1,8 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import * as NodeSqlite from "node:sqlite";
 import { describe, expect, it } from "@effect/vitest";
 
 import {
@@ -6,6 +11,7 @@ import {
   cursorIdeComposerPath,
   cursorIdePathEvidenceFolder,
   cursorIdeRootComposer,
+  loadCursorIdeIndex,
   parseCursorIdeComposerPath,
 } from "./CursorIdeIndex.ts";
 
@@ -115,5 +121,38 @@ describe("cursorIdePathEvidenceFolder", () => {
     expect(cursorIdeComposerLabels(index, "loose")).toContain("from file paths");
     expect(cursorIdeRootComposer(index, "leaf")).toBe("top");
     expect(cursorIdeRootComposer(index, "top")).toBeNull();
+  });
+
+  it("listing the IDE index does not read bubble rows", async () => {
+    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "cursor-ide-index-"));
+    const workspaceStorage = NodePath.join(root, "User", "workspaceStorage");
+    const workspaceId = "ws1";
+    const folder = NodePath.join(root, "project");
+    NodeFS.mkdirSync(NodePath.join(workspaceStorage, workspaceId), { recursive: true });
+    NodeFS.mkdirSync(folder, { recursive: true });
+    NodeFS.writeFileSync(
+      NodePath.join(workspaceStorage, workspaceId, "workspace.json"),
+      JSON.stringify({ folder: `file://${folder}` }),
+    );
+    const globalDb = NodePath.join(root, "User", "globalStorage", "state.vscdb");
+    NodeFS.mkdirSync(NodePath.dirname(globalDb), { recursive: true });
+    const db = new NodeSqlite.DatabaseSync(globalDb);
+    db.exec("CREATE TABLE cursorDiskKV (key TEXT, value TEXT)");
+    const composer = {
+      name: "Loose",
+      fullConversationHeadersOnly: [{ bubbleId: "b1" }],
+    };
+    const bubble = { relevantFiles: [`file://${folder}/src/main.ts`] };
+    const insert = db.prepare("INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)");
+    insert.run("composerData:loose", JSON.stringify(composer));
+    insert.run("bubbleId:loose:b1", JSON.stringify(bubble));
+    db.close();
+
+    const listed = await loadCursorIdeIndex(globalDb, workspaceStorage, 10_000, false);
+    expect(listed?.composers.has("loose")).toBe(true);
+    expect(listed?.pathFolderOf.size).toBe(0);
+
+    const withEvidence = await loadCursorIdeIndex(globalDb, workspaceStorage, 10_000, true);
+    expect(withEvidence?.pathFolderOf.get("loose")).toBe(folder);
   });
 });

@@ -97,7 +97,10 @@ function cursorSdkDefaultParameterValue(model: SDKModel, parameterId: string): s
     ?.params.find((parameter) => parameter.id === parameterId)?.value;
 }
 
-export function buildCursorCapabilitiesFromSdkModel(model: SDKModel): ModelCapabilities {
+export function buildCursorCapabilitiesFromSdkModel(
+  model: SDKModel,
+  defaultRunsOn: "local" | "worker" | "cloud" = "local",
+): ModelCapabilities {
   const seen = new Set<string>();
   const optionDescriptors: Array<ProviderOptionDescriptor> = [];
   const parameters = (model.parameters ?? [])
@@ -161,12 +164,13 @@ export function buildCursorCapabilitiesFromSdkModel(model: SDKModel): ModelCapab
     );
   }
 
-  optionDescriptors.push(cursorRunsOnDescriptor());
+  optionDescriptors.push(cursorRunsOnDescriptor(defaultRunsOn));
   return createModelCapabilities({ optionDescriptors });
 }
 
 export function buildCursorDiscoveredModelsFromSdk(
   models: ReadonlyArray<SDKModel>,
+  defaultRunsOn: "local" | "worker" | "cloud" = "local",
 ): ReadonlyArray<ServerProviderModel> {
   const seen = new Set<string>();
   return models.flatMap((model) => {
@@ -181,7 +185,7 @@ export function buildCursorDiscoveredModelsFromSdk(
         slug,
         name,
         isCustom: false,
-        capabilities: buildCursorCapabilitiesFromSdkModel(model),
+        capabilities: buildCursorCapabilitiesFromSdkModel(model, defaultRunsOn),
       } satisfies ServerProviderModel,
     ];
   });
@@ -347,7 +351,10 @@ export const checkCursorProviderStatus = Effect.fn("checkCursorProviderStatus")(
   }
 
   const snapshot = catalogResult.success.value;
-  const discoveredModels = buildCursorDiscoveredModelsFromSdk(snapshot.models);
+  const discoveredModels = buildCursorDiscoveredModelsFromSdk(
+    snapshot.models,
+    cursorSettings.defaultRunsOn,
+  );
   return buildCursorProviderSnapshot({
     checkedAt,
     cursorSettings,

@@ -13,8 +13,6 @@ import {
   type CodexTurnTokenUsageState,
 } from "../../provider/CodexTurnTokenUsage.ts";
 import type { ManagedServerProvider } from "@t3tools/provider-core/server/snapshot";
-import * as UsagePolicyService from "../../usage/UsagePolicyService.ts";
-import { emptyTokenCounts } from "@t3tools/shared/usagePolicies";
 import type { CodexEffectiveRuntime } from "../../provider/CodexManagedRuntime.ts";
 import {
   buildCodexInitializeParams,
@@ -4375,46 +4373,6 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 ),
               },
             });
-
-            // T3 usage policies: each Codex `last` is one model-response delta.
-            const usagePolicy = yield* Effect.serviceOption(UsagePolicyService.UsagePolicyService);
-            if (Option.isSome(usagePolicy)) {
-              const last = payload.tokenUsage.last;
-              const delta = {
-                ...emptyTokenCounts(),
-                inputTokens: Math.max(0, last.inputTokens),
-                cachedInputTokens: Math.max(0, last.cachedInputTokens),
-                ...(last.cacheWriteInputTokens !== undefined
-                  ? { cacheCreationTokens: Math.max(0, last.cacheWriteInputTokens) }
-                  : {}),
-                outputTokens: Math.max(0, last.outputTokens),
-                reasoningTokens: Math.max(0, last.reasoningOutputTokens),
-              };
-              const model = context.input.modelSelection.model;
-              const decision = yield* usagePolicy.value
-                .record({
-                  instanceId: adapterOptions.instanceId,
-                  driverKind: CODEX_PROVIDER,
-                  model,
-                  delta,
-                })
-                .pipe(Effect.catch(() => Effect.succeed({ decision: "allow" as const, groups: [] })));
-              if (decision.decision === "interrupt_cap") {
-                yield* client
-                  .request("turn/interrupt", {
-                    threadId: payload.threadId,
-                    turnId: payload.turnId,
-                  })
-                  .pipe(
-                    Effect.catch((cause) =>
-                      Effect.logWarning("orchestration-v2.codex-usage-policy-interrupt-failed", {
-                        cause,
-                        policyMessage: decision.message,
-                      }),
-                    ),
-                  );
-              }
-            }
           }).pipe(Effect.orDie),
         );
 

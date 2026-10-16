@@ -42,6 +42,8 @@ import {
   type CursorWorkerApprovals,
 } from "@t3tools/provider-cursor/server/CursorWorkerApprovals";
 import * as Effect from "effect/Effect";
+import * as Queue from "effect/Queue";
+import * as Stream from "effect/Stream";
 
 export interface CursorWorkerHooksDeps {
   readonly stateDir: string;
@@ -126,7 +128,7 @@ export const make = (deps: CursorWorkerHooksDeps) => {
       catch: fail("projectHooks"),
     });
 
-  const listApprovals = Effect.sync((): CursorAgentsApprovalsResult => ({
+  const snapshotApprovals = (): CursorAgentsApprovalsResult => ({
     approvals: approvals.pending().map((approval) => ({
       id: approval.id,
       agentId: approval.agentId,
@@ -136,14 +138,38 @@ export const make = (deps: CursorWorkerHooksDeps) => {
       workspaceRoots: [...approval.question.workspaceRoots],
       createdAt: approval.createdAt,
     })),
-  }));
+  });
+
+  const listApprovals = Effect.sync(snapshotApprovals);
+
+  const watchApprovals: Stream.Stream<CursorAgentsApprovalsResult> = Stream.callback(
+    (mailbox) =>
+      Effect.acquireRelease(
+        Effect.sync(() => {
+          const push = () => {
+            Queue.offerUnsafe(mailbox, snapshotApprovals());
+          };
+          push();
+          return approvals.subscribe(push);
+        }),
+        (unsubscribe) => Effect.sync(unsubscribe),
+      ),
+    { bufferSize: 1, strategy: "sliding" },
+  );
 
   const respondApproval = (input: CursorAgentsRespondApprovalInput) =>
     Effect.sync((): CursorAgentsRespondApprovalResult => ({
       found: approvals.respond(input.id, input.decision),
     }));
 
-  return { resumeIfConfigured, hookSetup, projectHooks, listApprovals, respondApproval };
+  return {
+    resumeIfConfigured,
+    hookSetup,
+    projectHooks,
+    listApprovals,
+    watchApprovals,
+    respondApproval,
+  };
 };
 
 export type CursorWorkerHooks = ReturnType<typeof make>;

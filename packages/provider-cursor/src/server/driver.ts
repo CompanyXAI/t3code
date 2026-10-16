@@ -82,7 +82,11 @@ export const CursorDriver: ProviderDriver<
       CursorUsageAccounts.CursorUsageAccounts.pipe(
         Effect.flatMap((accounts) =>
           accounts.scan({
-            keychainUsageEnabled: settings.cursorKeychainUsageEnabled,
+            keychainUsageEnabled: instances.some(
+              (instance) =>
+                (instance.config?.keychainUsageEnabled ?? settings.cursorKeychainUsageEnabled) ===
+                true,
+            ),
             instances,
             windowStartMs,
             retentionCutoffMs,
@@ -262,7 +266,8 @@ export const CursorDriver: ProviderDriver<
                             effectiveConfig,
                             processEnv,
                             apiKey,
-                            settings.cursorKeychainUsageEnabled,
+                            effectiveConfig.keychainUsageEnabled ??
+                              settings.cursorKeychainUsageEnabled,
                           ),
                         ),
                         Effect.map((usageLimits) => ({ ...snapshot, usageLimits })),

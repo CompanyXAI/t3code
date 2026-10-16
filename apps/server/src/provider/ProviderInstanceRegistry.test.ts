@@ -109,6 +109,7 @@ const makeCursorConfig = (overrides: Partial<CursorSettings>): CursorSettings =>
   approvalHooks: false,
   homePath: "",
   customModels: [],
+  defaultRunsOn: "local",
   ...overrides,
 });
 

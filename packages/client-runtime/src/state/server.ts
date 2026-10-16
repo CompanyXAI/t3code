@@ -927,6 +927,13 @@ export function createServerEnvironmentAtoms<R, E>(
           .sort()
           .map((model) => [model, aliases[model]]),
         settings?.cursorKeychainUsageEnabled ?? false,
+        Object.entries(settings?.providerInstances ?? {})
+          .filter(([, instance]) => instance.driver === "cursor")
+          .map(([id, instance]) => [
+            id,
+            (instance.config as { keychainUsageEnabled?: boolean } | undefined)
+              ?.keychainUsageEnabled ?? null,
+          ]),
       ]);
     }).pipe(Atom.withLabel(`environment-data:server:usage-scan-settings:${environmentId}`)),
   );
