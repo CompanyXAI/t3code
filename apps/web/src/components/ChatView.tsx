@@ -40,6 +40,8 @@ import {
 import { feedbackBannerItem } from "./chat/ComposerFeedback";
 import { usageLimitsBannerItem } from "./chat/ComposerUsageLimits";
 import {
+  CURSOR_IDE_IMPORT_BADGE_LABEL,
+  CURSOR_IDE_IMPORT_RESUME_TOOLTIP,
   cursorHandoffWarning,
   estimateHandoffContextTokens,
 } from "./chat/cursorHandoffWarning";
@@ -305,6 +307,7 @@ import { DeviceSetup } from "./device/DeviceSetup";
 import { Dialog } from "./ui/dialog";
 import { WizardPopup } from "./ui/wizard";
 import { BranchToolbar, type BranchToolbarHandle } from "./BranchToolbar";
+import { BranchName } from "./settings/BranchName";
 import { makeWorkspaceFileDropHandlers } from "./chat/workspaceFileDrop";
 import { isEditableFocused } from "../lib/editableFocus";
 import { DEFAULT_RESOLVED_KEYBINDINGS } from "@t3tools/shared/keybindings";
@@ -391,6 +394,8 @@ import {
   type DraftThreadEnvMode,
   useComposerDraftStore,
   DraftId,
+  dropPerChatOptions,
+  keepPerChatOptions,
 } from "../composerDraftStore";
 import {
   formatTerminalContextLabel,
@@ -590,6 +595,7 @@ import { readEnvironmentScope, readPreparedConnection } from "../state/session";
 import { useAtomCommand } from "../state/use-atom-command";
 import { useOrchestrationCommand } from "../state/use-orchestration-command";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
+import { Badge } from "./ui/badge";
 import { Button, InlineButton } from "./ui/button";
 import {
   AlertDialog,
@@ -4438,6 +4444,18 @@ export default function ChatView(props: ChatViewProps) {
       }
     };
     const finish = () => {
+      // Another machine has its own Cursor accounts and workers: start this
+      // draft on that machine ("This PC") rather than keep a worker/cloud choice.
+      const selection = composerRef.current?.getSendContext()?.selectedModelSelection;
+      if (selection) {
+        const reset = dropPerChatOptions(selection);
+        if (reset !== selection) {
+          setComposerDraftModelSelection(draftId, reset, {
+            explicit: true,
+            replaceOptions: true,
+          });
+        }
+      }
       if (environmentChangeRef.current === request) {
         environmentChangeRef.current = null;
         setIsEnvironmentChanging(false);
@@ -7481,13 +7499,18 @@ export default function ChatView(props: ChatViewProps) {
               <TooltipTrigger
                 render={
                   <code className="min-w-0 truncate font-medium text-foreground">
-                    {localCheckoutBranchMismatch.threadBranch}
+                    <BranchName
+                      value={localCheckoutBranchMismatch.threadBranch}
+                      showTitle={false}
+                    />
                   </code>
                 }
               />
               <TooltipPopup side="top">
-                This thread last ran on {localCheckoutBranchMismatch.threadBranch}. Sending will
-                continue on {localCheckoutBranchMismatch.currentBranch}.
+                This thread last ran on{" "}
+                <BranchName value={localCheckoutBranchMismatch.threadBranch} showTitle={false} />.
+                Sending will continue on{" "}
+                <BranchName value={localCheckoutBranchMismatch.currentBranch} showTitle={false} />.
               </TooltipPopup>
             </Tooltip>
           </span>
@@ -10351,12 +10374,17 @@ export default function ChatView(props: ChatViewProps) {
       if (options?.focusComposer !== false) scheduleComposerFocus();
       return;
     }
+    // Restore this model's own remembered options; without any, start it
+    // from its default rather than carrying the previous model's over.
+    // Per-chat options (Cursor's "Runs on") stay with the chat.
     const rememberedOptions =
       useComposerDraftStore.getState().stickyOptionsByModelByProvider[instanceId]?.[resolvedModel];
-    const nextModelSelection: ModelSelection =
+    const nextModelSelection: ModelSelection = keepPerChatOptions(
       rememberedOptions !== undefined && rememberedOptions.length > 0
         ? { instanceId, model: resolvedModel, options: [...rememberedOptions] }
-        : { instanceId, model: resolvedModel };
+        : { instanceId, model: resolvedModel },
+      activeThread.modelSelection,
+    );
     const modelChangeBlockReason = getStartedThreadModelChangeBlockReason({
       providers: providerStatuses,
       hasStartedSession: activeRuntime !== null,
@@ -11216,8 +11244,33 @@ export default function ChatView(props: ChatViewProps) {
                               }
                             />
                           ) : null}
+                          {serverProjection?.thread.nativeResumeUnavailable ===
+                          "cursor_ide_import" ? (
+                            <div className="mx-auto mb-1.5 flex w-full max-w-3xl px-1">
+                              <Tooltip>
+                                <TooltipTrigger
+                                  render={
+                                    <Badge
+                                      size="sm"
+                                      variant="outline"
+                                      data-cursor-ide-import-badge=""
+                                    />
+                                  }
+                                >
+                                  {CURSOR_IDE_IMPORT_BADGE_LABEL}
+                                </TooltipTrigger>
+                                <TooltipPopup>{CURSOR_IDE_IMPORT_RESUME_TOOLTIP}</TooltipPopup>
+                              </Tooltip>
+                            </div>
+                          ) : null}
                           {!composerMounted ? null : (
                             <ChatComposer
+                              nativeResumeUnavailableReason={
+                                serverProjection?.thread.nativeResumeUnavailable ===
+                                "cursor_ide_import"
+                                  ? CURSOR_IDE_IMPORT_RESUME_TOOLTIP
+                                  : null
+                              }
                               canOperateThread={canOperateThread}
                               reportedModelSelection={reportedModelSelection}
                               multipleModelSelections={multipleModelSelections}
@@ -11446,6 +11499,16 @@ export default function ChatView(props: ChatViewProps) {
                                     : undefined
                                 }
                                 availableEnvironments={logicalProjectEnvironments}
+                                machineHint={
+                                  composerRef.current
+                                    ?.getSendContext()
+                                    ?.selectedModelSelection?.options?.some(
+                                      (option) =>
+                                        option.id === "runsOn" && option.value === "cloud",
+                                    )
+                                    ? "Runs in Cursor's cloud; the machine doesn't matter."
+                                    : undefined
+                                }
                                 composerControlsHostRef={setRestingComposerControlsHost}
                                 contextStripVisible={showComposerContextStrip}
                               />
