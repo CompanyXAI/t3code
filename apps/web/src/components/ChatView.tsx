@@ -8261,7 +8261,7 @@ export default function ChatView(props: ChatViewProps) {
     const localApi = readLocalApi();
     return localApi == null ? window.confirm(message) : await localApi.dialogs.confirm(message);
   };
-    const onForkFromRun = async (input: {
+  const onForkFromRun = async (input: {
     readonly sourceThreadId: ThreadId;
     readonly runId: RunId;
   }) => {
@@ -8478,7 +8478,7 @@ export default function ChatView(props: ChatViewProps) {
     ) {
       return;
     }
-        if (needsLoadBalancing) {
+    if (needsLoadBalancing) {
       toastManager.add({
         type: "warning",
         title: loadBalancing.pending
